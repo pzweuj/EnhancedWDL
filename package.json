@@ -1,0 +1,47 @@
+{
+  "name": "wdl-syntax-pro",
+  "displayName": "WDL Syntax Pro",
+  "description": "Professional syntax highlighting and language support for WDL (Workflow Description Language) files with enhanced features",
+  "version": "1.0.0",
+  "publisher": "your-publisher-name",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/wdl-syntax-pro"
+  },
+  "keywords": [
+    "wdl",
+    "workflow",
+    "bioinformatics",
+    "syntax highlighting",
+    "cromwell",
+    "genomics"
+  ],
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "wdl",
+        "aliases": [
+          "WDL",
+          "Workflow Description Language"
+        ],
+        "extensions": [
+          ".wdl"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "wdl",
+        "scopeName": "source.wdl",
+        "path": "./syntaxes/wdl.tmLanguage.json"
+      }
+    ]
+  }
+}

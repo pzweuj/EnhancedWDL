@@ -1,0 +1,476 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "WDL",
+  "scopeName": "source.wdl",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#version"
+    },
+    {
+      "include": "#import"
+    },
+    {
+      "include": "#workflow"
+    },
+    {
+      "include": "#task"
+    },
+    {
+      "include": "#struct"
+    },
+    {
+      "include": "#command-block"
+    },
+    {
+      "include": "#conditional"
+    },
+    {
+      "include": "#scatter"
+    },
+    {
+      "include": "#builtin-functions"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#operators"
+    },
+    {
+      "include": "#numbers"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.number-sign.wdl",
+          "match": "#.*$"
+        }
+      ]
+    },
+    "version": {
+      "patterns": [
+        {
+          "name": "meta.version.wdl",
+          "match": "\\b(version)\\s+(\\d+\\.\\d+)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.control.version.wdl"
+            },
+            "2": {
+              "name": "constant.numeric.version.wdl"
+            }
+          }
+        }
+      ]
+    },
+    "import": {
+      "patterns": [
+        {
+          "name": "meta.import.wdl",
+          "match": "\\b(import)\\s+(\"[^\"]*\")(?:\\s+(as)\\s+(\\w+))?",
+          "captures": {
+            "1": {
+              "name": "keyword.control.import.wdl"
+            },
+            "2": {
+              "name": "string.quoted.double.wdl"
+            },
+            "3": {
+              "name": "keyword.control.as.wdl"
+            },
+            "4": {
+              "name": "entity.name.type.alias.wdl"
+            }
+          }
+        }
+      ]
+    },
+    "workflow": {
+      "patterns": [
+        {
+          "name": "meta.workflow.wdl",
+          "begin": "\\b(workflow)\\s+(\\w+)\\s*\\{",
+          "end": "\\}",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.control.workflow.wdl"
+            },
+            "2": {
+              "name": "entity.name.function.workflow.wdl"
+            }
+          },
+          "patterns": [
+            {
+              "include": "$self"
+            }
+          ]
+        }
+      ]
+    },
+    "task": {
+      "patterns": [
+        {
+          "name": "meta.task.wdl",
+          "begin": "\\b(task)\\s+(\\w+)\\s*\\{",
+          "end": "\\}",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.control.task.wdl"
+            },
+            "2": {
+              "name": "entity.name.function.task.wdl"
+            }
+          },
+          "patterns": [
+            {
+              "include": "$self"
+            }
+          ]
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.flow.wdl",
+          "match": "\\b(if|else|scatter)\\b"
+        },
+        {
+          "name": "keyword.control.wdl",
+          "match": "\\b(call|input|output|command|runtime|meta|parameter_meta|as|struct)\\b"
+        },
+        {
+          "name": "keyword.other.wdl",
+          "match": "\\b(true|false|null)\\b"
+        }
+      ]
+    },
+    "builtin-functions": {
+      "patterns": [
+        {
+          "name": "support.function.builtin.wdl",
+          "match": "\\b(select_first|select_all|defined|length|basename|size|glob|read_string|read_int|read_float|read_boolean|read_json|write_json|stdout|stderr|floor|ceil|round|min|max|sep|quote|squote|sub|range|transpose|zip|cross|unzip|flatten)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "meta.generic.wdl",
+          "begin": "\\b(Array|Map|Pair)\\s*\\[",
+          "end": "\\]",
+          "beginCaptures": {
+            "1": {
+              "name": "storage.type.collection.wdl"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#types"
+            },
+            {
+              "name": "punctuation.separator.comma.wdl",
+              "match": ","
+            }
+          ]
+        },
+        {
+          "name": "storage.type.primitive.wdl",
+          "match": "\\b(String|Int|Float|Boolean|File)\\b"
+        },
+        {
+          "name": "storage.type.collection.wdl",
+          "match": "\\b(Array|Map|Pair|Object)\\b"
+        },
+        {
+          "name": "storage.type.optional.wdl",
+          "match": "\\?"
+        },
+        {
+          "name": "storage.type.custom.wdl",
+          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.wdl",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "meta.embedded.expression.wdl",
+              "begin": "~\\{",
+              "end": "\\}",
+              "beginCaptures": {
+                "0": {
+                  "name": "punctuation.definition.template-expression.begin.wdl"
+                }
+              },
+              "endCaptures": {
+                "0": {
+                  "name": "punctuation.definition.template-expression.end.wdl"
+                }
+              },
+              "patterns": [
+                {
+                  "include": "#expressions"
+                }
+              ]
+            },
+            {
+              "name": "meta.embedded.expression.wdl",
+              "begin": "\\$\\{",
+              "end": "\\}",
+              "beginCaptures": {
+                "0": {
+                  "name": "punctuation.definition.template-expression.begin.wdl"
+                }
+              },
+              "endCaptures": {
+                "0": {
+                  "name": "punctuation.definition.template-expression.end.wdl"
+                }
+              },
+              "patterns": [
+                {
+                  "include": "#expressions"
+                }
+              ]
+            },
+            {
+              "name": "constant.character.escape.wdl",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "expressions": {
+      "patterns": [
+        {
+          "include": "#operators"
+        },
+        {
+          "include": "#numbers"
+        },
+        {
+          "name": "variable.other.wdl",
+          "match": "\\b[a-zA-Z_][a-zA-Z0-9_]*\\b"
+        }
+      ]
+    },
+    "command-block": {
+      "patterns": [
+        {
+          "name": "meta.embedded.block.shell.wdl",
+          "begin": "<<<",
+          "end": ">>>",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.begin.wdl"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.end.wdl"
+            }
+          },
+          "patterns": [
+            {
+              "name": "meta.embedded.expression.wdl",
+              "begin": "~\\{",
+              "end": "\\}",
+              "beginCaptures": {
+                "0": {
+                  "name": "punctuation.definition.template-expression.begin.wdl"
+                }
+              },
+              "endCaptures": {
+                "0": {
+                  "name": "punctuation.definition.template-expression.end.wdl"
+                }
+              },
+              "patterns": [
+                {
+                  "include": "#expressions"
+                }
+              ]
+            },
+            {
+              "name": "comment.line.number-sign.shell",
+              "match": "#.*$"
+            },
+            {
+              "name": "string.quoted.double.shell",
+              "begin": "\"",
+              "end": "\"",
+              "patterns": [
+                {
+                  "name": "constant.character.escape.shell",
+                  "match": "\\\\."
+                }
+              ]
+            },
+            {
+              "name": "string.quoted.single.shell",
+              "begin": "'",
+              "end": "'",
+              "patterns": [
+                {
+                  "name": "constant.character.escape.shell",
+                  "match": "\\\\."
+                }
+              ]
+            },
+            {
+              "name": "keyword.control.shell",
+              "match": "\\b(if|then|else|elif|fi|for|while|do|done|case|esac|function)\\b"
+            }
+          ]
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.comparison.wdl",
+          "match": "(==|!=|<=|>=|<|>)"
+        },
+        {
+          "name": "keyword.operator.logical.wdl",
+          "match": "(&&|\\|\\||!)"
+        },
+        {
+          "name": "keyword.operator.arithmetic.wdl",
+          "match": "[+\\-*/%]"
+        },
+        {
+          "name": "keyword.operator.assignment.wdl",
+          "match": "="
+        },
+        {
+          "name": "punctuation.separator.comma.wdl",
+          "match": ","
+        },
+        {
+          "name": "punctuation.terminator.semicolon.wdl",
+          "match": ";"
+        },
+        {
+          "name": "punctuation.separator.colon.wdl",
+          "match": ":"
+        },
+        {
+          "name": "punctuation.section.brackets.begin.wdl",
+          "match": "[\\[\\{\\(]"
+        },
+        {
+          "name": "punctuation.section.brackets.end.wdl",
+          "match": "[\\]\\}\\)]"
+        }
+      ]
+    },
+    "conditional": {
+      "patterns": [
+        {
+          "name": "meta.conditional.wdl",
+          "begin": "\\b(if)\\s*\\(",
+          "end": "\\)",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.control.conditional.wdl"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#expressions"
+            },
+            {
+              "include": "#operators"
+            },
+            {
+              "include": "#strings"
+            }
+          ]
+        },
+        {
+          "name": "keyword.control.conditional.wdl",
+          "match": "\\b(else)\\b"
+        }
+      ]
+    },
+    "scatter": {
+      "patterns": [
+        {
+          "name": "meta.scatter.wdl",
+          "begin": "\\b(scatter)\\s*\\(",
+          "end": "\\)",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.control.loop.wdl"
+            }
+          },
+          "patterns": [
+            {
+              "name": "keyword.operator.in.wdl",
+              "match": "\\bin\\b"
+            },
+            {
+              "include": "#expressions"
+            }
+          ]
+        }
+      ]
+    },
+    "struct": {
+      "patterns": [
+        {
+          "name": "meta.struct.wdl",
+          "begin": "\\b(struct)\\s+(\\w+)\\s*\\{",
+          "end": "\\}",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.control.struct.wdl"
+            },
+            "2": {
+              "name": "entity.name.type.struct.wdl"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#types"
+            },
+            {
+              "include": "#comments"
+            },
+            {
+              "name": "variable.other.member.wdl",
+              "match": "\\b[a-zA-Z_][a-zA-Z0-9_]*\\b"
+            }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.wdl",
+          "match": "\\b\\d+(\\.\\d+)?\\b"
+        }
+      ]
+    }
+  }
+}
