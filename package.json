@@ -50,8 +50,9 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "compile": "npx tsc -p ./",
+    "watch": "npx tsc -watch -p ./",
+    "test": "npm run compile && node out/test/runTest.js"
   },
   "devDependencies": {
     "@types/vscode": "^1.74.0",
