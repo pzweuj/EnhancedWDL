@@ -1,12 +1,12 @@
 {
-  "name": "wdl-syntax-pro",
-  "displayName": "WDL Syntax Pro",
+  "name": "enhancedwdl",
+  "displayName": "EnhancedWDL",
   "description": "Professional syntax highlighting and language support for WDL (Workflow Description Language) files with enhanced features",
-  "version": "1.0.0",
-  "publisher": "your-publisher-name",
+  "version": "0.0.2",
+  "publisher": "pzweuj",
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-username/wdl-syntax-pro"
+    "url": "https://github.com/pzweuj/EnhancedWDL"
   },
   "keywords": [
     "wdl",
@@ -21,6 +21,10 @@
   },
   "categories": [
     "Programming Languages"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:wdl"
   ],
   "contributes": {
     "languages": [
@@ -43,5 +47,20 @@
         "path": "./syntaxes/wdl.tmLanguage.json"
       }
     ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.74.0",
+    "@types/node": "^18.0.0",
+    "typescript": "^4.9.0"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^8.0.0",
+    "vscode-languageserver": "^8.0.0",
+    "vscode-languageserver-textdocument": "^1.0.0"
   }
 }
