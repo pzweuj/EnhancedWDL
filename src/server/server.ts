@@ -112,7 +112,7 @@ connection.onInitialized(async () => {
         if (healthReport.overall !== 'healthy') {
             connection.console.log(`Cache health: ${healthReport.overall}`);
             if (healthReport.recommendations.length > 0) {
-                connection.console.log('Cache recommendations:', healthReport.recommendations.join(', '));
+                connection.console.log(`Cache recommendations: ${healthReport.recommendations.join(', ')}`);
             }
         }
         

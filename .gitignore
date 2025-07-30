@@ -3,6 +3,7 @@ out/
 dist/
 *.vsix
 .kiro
+.claude
 
 # Node.js dependencies
 node_modules/

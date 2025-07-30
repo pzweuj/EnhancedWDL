@@ -103,7 +103,7 @@ export class CacheIntegrityValidator {
         const result = {
             repaired: 0,
             removed: 0,
-            errors: []
+            errors: [] as string[]
         };
         
         try {
@@ -210,7 +210,7 @@ export class CacheIntegrityValidator {
     }> {
         const result = {
             optimized: false,
-            actions: [],
+            actions: [] as string[],
             sizeBefore: 0,
             sizeAfter: 0
         };
@@ -377,7 +377,7 @@ export class CacheIntegrityValidator {
         removed: number;
         errors: string[];
     }> {
-        const result = { repaired: 0, removed: 0, errors: [] };
+        const result = { repaired: 0, removed: 0, errors: [] as string[] };
         
         try {
             // Remove corrupted entries
@@ -408,7 +408,7 @@ export class CacheIntegrityValidator {
         removed: number;
         errors: string[];
     }> {
-        const result = { repaired: 0, removed: 0, errors: [] };
+        const result = { repaired: 0, removed: 0, errors: [] as string[] };
         
         try {
             // Remove corrupted entries

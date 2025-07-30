@@ -40,10 +40,10 @@ describe('PersistentCacheManager', () => {
                 tasks: new Map([
                     ['task1', {
                         name: 'TestTask',
-                        inputs: [{ name: 'input1', type: 'String', required: true, description: 'Test input' }],
-                        outputs: [{ name: 'output1', type: 'File', description: 'Test output' }],
+                        inputs: [{ name: 'input1', type: { name: 'String', optional: false }, optional: false, description: 'Test input' }],
+                        outputs: [{ name: 'output1', type: { name: 'File', optional: false }, optional: false, description: 'Test output' }],
                         sourceFile: '/test/file.wdl',
-                        range: { start: { line: 0, column: 0 }, end: { line: 10, column: 0 } }
+                        range: { start: { line: 0, column: 0, offset: 0 }, end: { line: 10, column: 0, offset: 100 } }
                     }]
                 ]),
                 workflows: new Map(),
