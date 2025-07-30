@@ -107,7 +107,7 @@
               "name": "keyword.control.workflow.wdl"
             },
             "2": {
-              "name": "entity.name.function.workflow.wdl"
+              "name": "entity.name.type.workflow.wdl"
             }
           },
           "patterns": [
@@ -129,7 +129,7 @@
               "name": "keyword.control.task.wdl"
             },
             "2": {
-              "name": "entity.name.function.task.wdl"
+              "name": "entity.name.type.task.wdl"
             }
           },
           "patterns": [
