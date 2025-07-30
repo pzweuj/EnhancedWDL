@@ -6,6 +6,7 @@ import { TaskAnalyzer } from './taskAnalyzer';
 import * as AST from './ast';
 import { FileSystemWatcher, FileChangeEvent } from './fileSystemWatcher';
 import { CacheManager } from './cacheManager';
+import { PersistentCacheManager } from './persistentCacheManager';
 
 export interface ImportResult {
     success: boolean;
@@ -43,11 +44,13 @@ export interface CacheStatistics {
 export class ImportResolver {
     private taskAnalyzer: TaskAnalyzer;
     private cacheManager: CacheManager<CachedImport>;
+    private persistentCache: PersistentCacheManager;
     private fileWatcher: FileSystemWatcher;
     private watchedDirectories: Set<string> = new Set();
     private readonly MAX_RECURSION_DEPTH = 10;
     private readonly CACHE_TTL = 10 * 60 * 1000; // 10 minutes
     private readonly MAX_CACHE_SIZE = 200;
+    private isInitialized: boolean = false;
     
     constructor() {
         this.taskAnalyzer = new TaskAnalyzer();
@@ -61,6 +64,15 @@ export class ImportResolver {
             enableStats: true
         });
         
+        // Initialize persistent cache manager
+        this.persistentCache = new PersistentCacheManager({
+            cacheDir: '.wdl-cache/imports',
+            compressionEnabled: true,
+            checksumValidation: true,
+            autoSave: true,
+            saveInterval: 3 * 60 * 1000 // 3 minutes
+        });
+        
         // Initialize file system watcher
         this.fileWatcher = new FileSystemWatcher({
             recursive: true,
@@ -69,6 +81,24 @@ export class ImportResolver {
         });
         
         this.setupEventHandlers();
+    }
+    
+    /**
+     * Initialize the import resolver with persistent cache
+     */
+    async initialize(): Promise<void> {
+        if (this.isInitialized) {
+            return;
+        }
+        
+        try {
+            await this.persistentCache.initialize();
+            await this.loadImportCacheFromPersistent();
+            this.isInitialized = true;
+        } catch (error) {
+            console.warn('Failed to initialize persistent import cache, continuing without cache:', error);
+            this.isInitialized = true;
+        }
     }
     
     /**
@@ -82,6 +112,74 @@ export class ImportResolver {
         this.fileWatcher.on('error', (error: Error) => {
             console.warn('FileSystemWatcher error:', error);
         });
+        
+        // Setup persistent cache event handlers
+        this.persistentCache.on('error', (event) => {
+            console.warn('Persistent import cache error:', event);
+        });
+        
+        this.persistentCache.on('saved', (event) => {
+            console.log('Import cache saved:', event);
+        });
+    }
+    
+    /**
+     * Load import cache from persistent storage
+     */
+    private async loadImportCacheFromPersistent(): Promise<void> {
+        try {
+            const cachedImports = await this.persistentCache.loadImportCache();
+            if (cachedImports) {
+                // Populate in-memory cache with persistent data
+                for (const [key, cachedImport] of cachedImports) {
+                    // Validate that the cached import is still valid
+                    if (this.isImportCacheValid(cachedImport)) {
+                        this.cacheManager.set(key, cachedImport);
+                    }
+                }
+                console.log(`Loaded ${cachedImports.size} import entries from persistent cache`);
+            }
+        } catch (error) {
+            console.warn('Failed to load import cache from persistent storage:', error);
+        }
+    }
+    
+    /**
+     * Save import cache to persistent storage
+     */
+    private async saveImportCacheToPersistent(): Promise<void> {
+        if (!this.isInitialized) {
+            return;
+        }
+        
+        try {
+            // Convert in-memory cache to Map for persistent storage
+            const importData = new Map<string, CachedImport>();
+            for (const key of this.cacheManager.keys()) {
+                const cached = this.cacheManager.get(key);
+                if (cached) {
+                    importData.set(key, cached);
+                }
+            }
+            
+            await this.persistentCache.saveImportCache(importData);
+        } catch (error) {
+            console.warn('Failed to save import cache to persistent storage:', error);
+        }
+    }
+    
+    /**
+     * Check if cached import is still valid
+     */
+    private isImportCacheValid(cachedImport: CachedImport): boolean {
+        try {
+            // Check if file still exists and hasn't been modified
+            const stats = fs.statSync(cachedImport.uri);
+            return stats.mtime.getTime() <= cachedImport.lastModified;
+        } catch (error) {
+            // File doesn't exist or can't be accessed
+            return false;
+        }
     }
     
     /**
@@ -116,7 +214,7 @@ export class ImportResolver {
         const result = await this.resolveImportFromFile(resolvedPath, alias, new Set(), 0);
         
         // Cache the result
-        this.cacheImport(cacheKey, {
+        await this.cacheImport(cacheKey, {
             uri: resolvedPath,
             path: importPath,
             alias,
@@ -149,10 +247,20 @@ export class ImportResolver {
     /**
      * Handle import file change by invalidating related cache entries
      */
-    handleImportFileChange(importUri: string): void {
+    async handleImportFileChange(importUri: string): Promise<void> {
+        // Invalidate in-memory cache
         this.cacheManager.invalidate((key, cached) => {
             return cached.uri === importUri || cached.dependencies.includes(importUri);
         });
+        
+        // Invalidate persistent cache
+        if (this.isInitialized) {
+            try {
+                await this.persistentCache.invalidateByUri(importUri);
+            } catch (error) {
+                console.warn('Failed to invalidate persistent cache for URI:', importUri, error);
+            }
+        }
     }
     
     /**
@@ -177,8 +285,38 @@ export class ImportResolver {
     /**
      * Clear all cache entries
      */
-    clearCache(): void {
+    async clearCache(): Promise<void> {
         this.cacheManager.clear();
+        
+        // Also clear persistent cache
+        if (this.isInitialized) {
+            try {
+                await this.persistentCache.clearCache();
+            } catch (error) {
+                console.warn('Failed to clear persistent cache:', error);
+            }
+        }
+    }
+    
+    /**
+     * Get persistent cache manager instance
+     */
+    getPersistentCache(): PersistentCacheManager {
+        return this.persistentCache;
+    }
+    
+    /**
+     * Destroy the import resolver and clean up resources
+     */
+    async destroy(): Promise<void> {
+        // Save current cache state before destroying
+        await this.saveImportCacheToPersistent();
+        
+        // Destroy persistent cache
+        await this.persistentCache.destroy();
+        
+        // Clean up file watcher
+        this.fileWatcher.removeAllListeners();
     }
     
     // Private methods
@@ -369,8 +507,17 @@ export class ImportResolver {
     /**
      * Cache import result
      */
-    private cacheImport(cacheKey: string, cached: CachedImport): void {
+    private async cacheImport(cacheKey: string, cached: CachedImport): Promise<void> {
         this.cacheManager.set(cacheKey, cached);
+        
+        // Also save to persistent cache
+        if (this.isInitialized) {
+            try {
+                await this.persistentCache.saveCachedImport(cacheKey, cached);
+            } catch (error) {
+                console.warn('Failed to save cached import to persistent storage:', error);
+            }
+        }
     }
     
     /**

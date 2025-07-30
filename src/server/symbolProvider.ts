@@ -1,5 +1,6 @@
 import { DocumentAnalyzer, DocumentInfo } from './documentAnalyzer';
 import { TaskInfo, ParameterInfo } from './taskAnalyzer';
+import { PersistentCacheManager } from './persistentCacheManager';
 import * as AST from './ast';
 
 export interface TaskSource {
@@ -56,6 +57,8 @@ export interface SymbolTable {
 export class SymbolProvider {
     private documentAnalyzer: DocumentAnalyzer;
     private symbolTable: SymbolTable;
+    private persistentCache: PersistentCacheManager;
+    private isInitialized: boolean = false;
     
     constructor() {
         this.documentAnalyzer = new DocumentAnalyzer();
@@ -64,6 +67,81 @@ export class SymbolProvider {
             workflows: new Map(),
             lastModified: new Map()
         };
+        this.persistentCache = new PersistentCacheManager({
+            cacheDir: '.wdl-cache/symbols',
+            compressionEnabled: true,
+            checksumValidation: true,
+            autoSave: true,
+            saveInterval: 2 * 60 * 1000 // 2 minutes
+        });
+        
+        this.setupCacheEventHandlers();
+    }
+    
+    /**
+     * Initialize the symbol provider with persistent cache
+     */
+    async initialize(): Promise<void> {
+        if (this.isInitialized) {
+            return;
+        }
+        
+        try {
+            await this.persistentCache.initialize();
+            await this.loadSymbolTableFromCache();
+            this.isInitialized = true;
+        } catch (error) {
+            console.warn('Failed to initialize persistent cache, continuing without cache:', error);
+            this.isInitialized = true;
+        }
+    }
+    
+    /**
+     * Setup event handlers for cache events
+     */
+    private setupCacheEventHandlers(): void {
+        this.persistentCache.on('error', (event) => {
+            console.warn('Persistent cache error:', event);
+        });
+        
+        this.persistentCache.on('saved', (event) => {
+            console.log('Symbol cache saved:', event);
+        });
+        
+        this.persistentCache.on('migrationStarted', (event) => {
+            console.log('Cache migration started:', event);
+        });
+    }
+    
+    /**
+     * Load symbol table from persistent cache
+     */
+    private async loadSymbolTableFromCache(): Promise<void> {
+        try {
+            // Try to load from cache for each known document
+            const cachedSymbols = await this.persistentCache.loadSymbolTable('global');
+            if (cachedSymbols) {
+                this.symbolTable = cachedSymbols;
+                console.log(`Loaded ${cachedSymbols.tasks.size} tasks and ${cachedSymbols.workflows.size} workflows from cache`);
+            }
+        } catch (error) {
+            console.warn('Failed to load symbol table from cache:', error);
+        }
+    }
+    
+    /**
+     * Save symbol table to persistent cache
+     */
+    private async saveSymbolTableToCache(): Promise<void> {
+        if (!this.isInitialized) {
+            return;
+        }
+        
+        try {
+            await this.persistentCache.saveSymbolTable(this.symbolTable, 'global');
+        } catch (error) {
+            console.warn('Failed to save symbol table to cache:', error);
+        }
     }
     
     /**
@@ -80,15 +158,24 @@ export class SymbolProvider {
         
         // Update last modified time
         this.symbolTable.lastModified.set(uri, Date.now());
+        
+        // Save to persistent cache
+        await this.saveSymbolTableToCache();
     }
     
     /**
      * Remove document from symbol table
      */
-    removeDocument(uri: string): void {
+    async removeDocument(uri: string): Promise<void> {
         this.removeDocumentSymbols(uri);
         this.symbolTable.lastModified.delete(uri);
         this.documentAnalyzer.clearCache(uri);
+        
+        // Invalidate cache entries for this URI
+        await this.persistentCache.invalidateByUri(uri);
+        
+        // Save updated symbol table to cache
+        await this.saveSymbolTableToCache();
     }
     
     /**
@@ -328,6 +415,20 @@ export class SymbolProvider {
      */
     getDocumentAnalyzer(): DocumentAnalyzer {
         return this.documentAnalyzer;
+    }
+    
+    /**
+     * Get persistent cache manager instance
+     */
+    getPersistentCache(): PersistentCacheManager {
+        return this.persistentCache;
+    }
+    
+    /**
+     * Destroy the symbol provider and clean up resources
+     */
+    async destroy(): Promise<void> {
+        await this.persistentCache.destroy();
     }
     
     /**

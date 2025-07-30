@@ -20,6 +20,8 @@ import { SymbolProvider } from './symbolProvider';
 import { HoverProvider } from './hoverProvider';
 import { CompletionProvider } from './completionProvider';
 import { DiagnosticProvider } from './diagnosticProvider';
+import { CacheIntegrityValidator } from './cacheIntegrityValidator';
+import { CacheMigrationManager } from './cacheMigrationManager';
 
 // Create a connection for the server, using Node's IPC as a transport.
 const connection = createConnection(ProposedFeatures.all);
@@ -32,6 +34,10 @@ const symbolProvider = new SymbolProvider();
 const hoverProvider = new HoverProvider(symbolProvider);
 const completionProvider = new CompletionProvider(symbolProvider);
 const diagnosticProvider = new DiagnosticProvider(symbolProvider);
+
+// Initialize cache systems
+let cacheIntegrityValidator: CacheIntegrityValidator;
+let cacheMigrationManager: CacheMigrationManager;
 
 let hasConfigurationCapability = false;
 let hasWorkspaceFolderCapability = false;
@@ -77,7 +83,7 @@ connection.onInitialize((params: InitializeParams) => {
     return result;
 });
 
-connection.onInitialized(() => {
+connection.onInitialized(async () => {
     if (hasConfigurationCapability) {
         // Register for all configuration changes.
         connection.client.register(DidChangeConfigurationNotification.type, undefined);
@@ -86,6 +92,33 @@ connection.onInitialized(() => {
         connection.workspace.onDidChangeWorkspaceFolders(_event => {
             connection.console.log('Workspace folder change event received.');
         });
+    }
+    
+    // Initialize persistent cache systems
+    try {
+        await symbolProvider.initialize();
+        
+        // Initialize import resolver through document analyzer
+        const documentAnalyzer = symbolProvider.getDocumentAnalyzer();
+        const importResolver = documentAnalyzer.getImportResolver();
+        await importResolver.initialize();
+        
+        // Initialize cache management utilities
+        cacheIntegrityValidator = new CacheIntegrityValidator(symbolProvider, importResolver);
+        cacheMigrationManager = new CacheMigrationManager('.wdl-cache');
+        
+        // Perform cache health check
+        const healthReport = await cacheIntegrityValidator.generateHealthReport();
+        if (healthReport.overall !== 'healthy') {
+            connection.console.log(`Cache health: ${healthReport.overall}`);
+            if (healthReport.recommendations.length > 0) {
+                connection.console.log('Cache recommendations:', healthReport.recommendations.join(', '));
+            }
+        }
+        
+        connection.console.log('WDL Language Server initialized with persistent cache support');
+    } catch (error) {
+        connection.console.log(`Failed to initialize persistent cache: ${error}`);
     }
 });
 
@@ -237,6 +270,22 @@ connection.onHover(
 // Make the text document manager listen on the connection
 // for open, change and close text document events
 documents.listen(connection);
+
+// Handle server shutdown
+connection.onShutdown(async () => {
+    try {
+        // Clean up persistent cache resources
+        await symbolProvider.destroy();
+        
+        const documentAnalyzer = symbolProvider.getDocumentAnalyzer();
+        const importResolver = documentAnalyzer.getImportResolver();
+        await importResolver.destroy();
+        
+        connection.console.log('WDL Language Server shutdown complete');
+    } catch (error) {
+        connection.console.log(`Error during shutdown: ${error}`);
+    }
+});
 
 // Listen on the connection
 connection.listen();
