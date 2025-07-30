@@ -81,17 +81,14 @@ Hover over the following elements:
 
 ## 📦 Installation
 
-### VS Code
-1. Compile TypeScript code: `npm run compile`
-2. Install the extension in VS Code
+### Easy Installation
+1. Go to the [Releases](https://github.com/pzweuj/EnhancedWDL/releases) page and download the latest `.vsix` file
+2. Drag and drop the `.vsix` file into the VS Code editor's extensions panel
 3. Open `.wdl` files to use all features
 
-### Compatibility
-This extension follows the Language Server Protocol (LSP) standard and supports:
+### Supported Editors
 - VS Code
-- VS Code-based editors (Cursor, Code-OSS, etc.)
-- Any LSP-compatible editor
-- Kiro IDE language system
+- VS Code-based editors: Cursor, Trae, Kiro, etc.
 
 ## 🏗️ Technical Architecture
 

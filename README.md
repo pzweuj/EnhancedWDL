@@ -81,17 +81,14 @@ call QualityCheck {
 
 ## 📦 安装
 
-### VS Code
-1. 编译 TypeScript 代码：`npm run compile`
-2. 在 VS Code 中安装扩展
+### 简单安装
+1. 前往 [Releases](https://github.com/pzweuj/EnhancedWDL/releases) 页面下载最新的 `.vsix` 文件
+2. 将 `.vsix` 文件拖拽到 VS Code 编辑器的扩展面板中
 3. 打开 `.wdl` 文件即可使用所有功能
 
-### 兼容性
-此扩展遵循语言服务器协议 (LSP) 标准，支持：
+### 支持的编辑器
 - VS Code
-- 基于 VS Code 的编辑器 (Cursor, Code-OSS 等)
-- 任何支持 LSP 的编辑器
-- Kiro IDE 语言系统
+- 基于 VS Code 开发的编辑器：Cursor、Trae、Kiro 等
 
 ## 🏗️ 技术架构
 
