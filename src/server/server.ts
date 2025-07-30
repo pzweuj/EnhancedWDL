@@ -189,13 +189,13 @@ connection.onDidChangeWatchedFiles(_change => {
 
 // This handler provides the initial list of the completion items.
 connection.onCompletion(
-    (textDocumentPosition: TextDocumentPositionParams): CompletionItem[] => {
+    async (textDocumentPosition: TextDocumentPositionParams): Promise<CompletionItem[]> => {
         const document = documents.get(textDocumentPosition.textDocument.uri);
         if (!document) {
             return [];
         }
         
-        return completionProvider.provideCompletionItems(
+        return await completionProvider.provideCompletionItems(
             document,
             textDocumentPosition.position.line,
             textDocumentPosition.position.character
