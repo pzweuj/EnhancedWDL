@@ -31,6 +31,9 @@
       "include": "#scatter"
     },
     {
+      "include": "#call-statement"
+    },
+    {
       "include": "#builtin-functions"
     },
     {
@@ -104,10 +107,10 @@
           "end": "\\}",
           "beginCaptures": {
             "1": {
-              "name": "keyword.control.workflow.wdl"
+              "name": "storage.type.workflow.wdl"
             },
             "2": {
-              "name": "entity.name.type.workflow.wdl"
+              "name": "entity.name.class.workflow.wdl"
             }
           },
           "patterns": [
@@ -126,10 +129,10 @@
           "end": "\\}",
           "beginCaptures": {
             "1": {
-              "name": "keyword.control.task.wdl"
+              "name": "storage.type.task.wdl"
             },
             "2": {
-              "name": "entity.name.type.task.wdl"
+              "name": "entity.name.class.task.wdl"
             }
           },
           "patterns": [
@@ -148,11 +151,35 @@
         },
         {
           "name": "keyword.control.wdl",
-          "match": "\\b(call|input|output|command|runtime|meta|parameter_meta|as|struct)\\b"
+          "match": "\\b(input|output|command|runtime|meta|parameter_meta|struct)\\b"
+        },
+        {
+          "name": "keyword.control.call.wdl",
+          "match": "\\bcall\\b"
+        },
+        {
+          "name": "keyword.control.as.wdl",
+          "match": "\\bas\\b"
         },
         {
           "name": "keyword.other.wdl",
           "match": "\\b(true|false|null)\\b"
+        }
+      ]
+    },
+    "call-statement": {
+      "patterns": [
+        {
+          "name": "meta.call.wdl",
+          "match": "\\bcall\\s+(\\w+)(?:\\s+as\\s+(\\w+))?",
+          "captures": {
+            "1": {
+              "name": "entity.name.function.call.wdl"
+            },
+            "2": {
+              "name": "entity.name.alias.wdl"
+            }
+          }
         }
       ]
     },
@@ -446,7 +473,7 @@
               "name": "keyword.control.struct.wdl"
             },
             "2": {
-              "name": "entity.name.type.struct.wdl"
+              "name": "entity.name.class.struct.wdl"
             }
           },
           "patterns": [

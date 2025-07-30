@@ -46,6 +46,13 @@
         "scopeName": "source.wdl",
         "path": "./syntaxes/wdl.tmLanguage.json"
       }
+    ],
+    "themes": [
+      {
+        "label": "WDL Enhanced Colors",
+        "uiTheme": "vs-dark",
+        "path": "./themes/wdl-color-theme.json"
+      }
     ]
   },
   "scripts": {

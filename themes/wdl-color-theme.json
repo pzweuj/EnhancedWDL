@@ -1,0 +1,73 @@
+{
+  "name": "WDL Enhanced Colors",
+  "type": "dark",
+  "colors": {},
+  "tokenColors": [
+    {
+      "name": "Task/Workflow definitions",
+      "scope": [
+        "entity.name.class.task.wdl",
+        "entity.name.class.workflow.wdl",
+        "entity.name.class.struct.wdl"
+      ],
+      "settings": {
+        "foreground": "#00BFFF"
+      }
+    },
+    {
+      "name": "Call statement task names",
+      "scope": [
+        "entity.name.function.call.wdl"
+      ],
+      "settings": {
+        "foreground": "#00BFFF"
+      }
+    },
+    {
+      "name": "Call statement aliases",
+      "scope": [
+        "entity.name.alias.wdl"
+      ],
+      "settings": {
+        "foreground": "#00BFFF"
+      }
+    },
+    {
+      "name": "Call keyword",
+      "scope": [
+        "keyword.control.call.wdl"
+      ],
+      "settings": {
+        "foreground": "#FF79C6"
+      }
+    },
+    {
+      "name": "As keyword",
+      "scope": [
+        "keyword.control.as.wdl"
+      ],
+      "settings": {
+        "foreground": "#FF79C6"
+      }
+    },
+    {
+      "name": "Built-in functions",
+      "scope": [
+        "support.function.builtin.wdl"
+      ],
+      "settings": {
+        "foreground": "#FFD700"
+      }
+    },
+    {
+      "name": "Other keywords",
+      "scope": [
+        "keyword.control.wdl",
+        "keyword.control.flow.wdl"
+      ],
+      "settings": {
+        "foreground": "#FF79C6"
+      }
+    }
+  ]
+}
