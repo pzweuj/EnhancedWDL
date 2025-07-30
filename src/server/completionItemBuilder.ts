@@ -3,7 +3,8 @@ import {
     CompletionItemKind,
     InsertTextFormat,
     MarkupContent,
-    MarkupKind
+    MarkupKind,
+    CompletionItemTag
 } from 'vscode-languageserver/node';
 import { TaskSymbol, EnhancedTaskSymbol, TaskSource } from './symbolProvider';
 import { TaskAnalyzer, ParameterInfo, TypeInfo } from './taskAnalyzer';
@@ -14,11 +15,32 @@ export interface CompletionItemOptions {
     prioritizeRequired?: boolean;
     showTypeDetails?: boolean;
     includeExamples?: boolean;
+    showIcons?: boolean;
+    enableSmartSorting?: boolean;
+    includeDeprecationInfo?: boolean;
+    showParameterHints?: boolean;
+    enableContextualInserts?: boolean;
+}
+
+export interface CompletionItemCategory {
+    name: string;
+    priority: number;
+    icon?: string;
+    description?: string;
+}
+
+export interface SmartInsertContext {
+    currentLine: string;
+    previousLine?: string;
+    indentLevel: number;
+    isInBlock: boolean;
+    blockType?: 'task' | 'workflow' | 'command' | 'input' | 'output';
 }
 
 export class CompletionItemBuilder {
     private taskAnalyzer: TaskAnalyzer;
     private defaultOptions: CompletionItemOptions;
+    private categories: Map<string, CompletionItemCategory> = new Map();
     
     constructor(options: CompletionItemOptions = {}) {
         this.taskAnalyzer = new TaskAnalyzer();
@@ -28,8 +50,31 @@ export class CompletionItemBuilder {
             prioritizeRequired: true,
             showTypeDetails: true,
             includeExamples: false,
+            showIcons: true,
+            enableSmartSorting: true,
+            includeDeprecationInfo: true,
+            showParameterHints: true,
+            enableContextualInserts: true,
             ...options
         };
+        
+        this.initializeCategories();
+    }
+    
+    /**
+     * Initialize completion item categories
+     */
+    private initializeCategories(): void {
+        this.categories = new Map([
+            ['required-input', { name: 'Required Inputs', priority: 1, icon: '🔴', description: 'Required task parameters' }],
+            ['optional-input', { name: 'Optional Inputs', priority: 2, icon: '🟡', description: 'Optional task parameters' }],
+            ['local-task', { name: 'Local Tasks', priority: 3, icon: '🏠', description: 'Tasks defined in current file' }],
+            ['imported-task', { name: 'Imported Tasks', priority: 4, icon: '📦', description: 'Tasks from imported files' }],
+            ['output', { name: 'Outputs', priority: 5, icon: '📤', description: 'Task output values' }],
+            ['builtin-function', { name: 'Built-in Functions', priority: 6, icon: '⚙️', description: 'WDL built-in functions' }],
+            ['keyword', { name: 'Keywords', priority: 7, icon: '🔤', description: 'WDL language keywords' }],
+            ['type', { name: 'Types', priority: 8, icon: '🏷️', description: 'WDL data types' }]
+        ]);
     }
     
     /**
@@ -196,38 +241,317 @@ export class CompletionItemBuilder {
         };
     }
     
+    /**
+     * Build an enhanced completion item with advanced features
+     */
+    buildEnhancedCompletionItem(
+        label: string,
+        kind: CompletionItemKind,
+        detail: string,
+        documentation: MarkupContent,
+        insertText: string,
+        sortText: string,
+        options?: {
+            insertTextFormat?: InsertTextFormat;
+            filterText?: string;
+            additionalTextEdits?: any[];
+            command?: any;
+            tags?: CompletionItemTag[];
+            category?: string;
+            priority?: number;
+            deprecated?: boolean;
+        }
+    ): CompletionItem {
+        const item: CompletionItem = {
+            label,
+            kind,
+            detail,
+            documentation,
+            insertText,
+            insertTextFormat: options?.insertTextFormat || InsertTextFormat.PlainText,
+            sortText,
+            filterText: options?.filterText,
+            additionalTextEdits: options?.additionalTextEdits,
+            command: options?.command,
+            tags: options?.tags
+        };
+        
+        // Add custom data for enhanced features
+        if (options?.category || options?.priority !== undefined) {
+            item.data = {
+                category: options.category,
+                priority: options.priority,
+                deprecated: options.deprecated
+            };
+        }
+        
+        return item;
+    }
+    
+    /**
+     * Generate smart input snippet with context awareness
+     */
+    private generateSmartInputSnippet(input: ParameterInfo, options: CompletionItemOptions): string {
+        const placeholder = this.generateEnhancedTypePlaceholder(input.type, 1, input);
+        
+        // Add parameter hints if enabled
+        if (options.showParameterHints && input.description) {
+            const hint = input.description.length > 50 
+                ? input.description.substring(0, 47) + '...' 
+                : input.description;
+            return `${input.name} = ${placeholder} $0 // ${hint}`;
+        }
+        
+        return `${input.name} = ${placeholder}$0`;
+    }
+    
+    /**
+     * Generate enhanced type placeholder with better defaults
+     */
+    private generateEnhancedTypePlaceholder(type: TypeInfo, tabstop: number, parameter?: ParameterInfo): string {
+        const baseType = type.name.toLowerCase();
+        
+        // Use parameter-specific defaults if available
+        if (parameter?.defaultValue !== undefined) {
+            return `\${${tabstop}:${parameter.defaultValue}}`;
+        }
+        
+        // Enhanced type-specific placeholders
+        switch (baseType) {
+            case 'string':
+                if (parameter?.name.toLowerCase().includes('path') || 
+                    parameter?.name.toLowerCase().includes('file')) {
+                    return `\${${tabstop}:"path/to/file"}`;
+                }
+                if (parameter?.name.toLowerCase().includes('name')) {
+                    return `\${${tabstop}:"sample_name"}`;
+                }
+                return `\${${tabstop}:"value"}`;
+                
+            case 'int':
+                if (parameter?.name.toLowerCase().includes('thread') || 
+                    parameter?.name.toLowerCase().includes('cpu')) {
+                    return `\${${tabstop}:4}`;
+                }
+                if (parameter?.name.toLowerCase().includes('memory') || 
+                    parameter?.name.toLowerCase().includes('mem')) {
+                    return `\${${tabstop}:8}`;
+                }
+                return `\${${tabstop}:1}`;
+                
+            case 'float':
+                if (parameter?.name.toLowerCase().includes('threshold')) {
+                    return `\${${tabstop}:0.05}`;
+                }
+                return `\${${tabstop}:1.0}`;
+                
+            case 'boolean':
+                return `\${${tabstop}|true,false|}`;
+                
+            case 'file':
+                if (parameter?.name.toLowerCase().includes('input')) {
+                    return `\${${tabstop}:input_file}`;
+                }
+                if (parameter?.name.toLowerCase().includes('reference') || 
+                    parameter?.name.toLowerCase().includes('ref')) {
+                    return `\${${tabstop}:reference.fa}`;
+                }
+                return `\${${tabstop}:file_path}`;
+                
+            case 'array':
+                // For arrays, provide a simple placeholder
+                return `\${${tabstop}:[]}`;
+                return `\${${tabstop}:[]}`;
+                
+            case 'map':
+                return `\${${tabstop}:{"key": "value"}}`;
+                
+            default:
+                return `\${${tabstop}:value}`;
+        }
+    }
+    
+    /**
+     * Generate smart sort text with category-based sorting
+     */
+    private generateSmartSortText(label: string, category: string, options: CompletionItemOptions): string {
+        if (!options.enableSmartSorting) {
+            return label;
+        }
+        
+        const categoryInfo = this.categories.get(category);
+        const priority = categoryInfo?.priority || 99;
+        
+        // Format: priority_category_label
+        return `${priority.toString().padStart(2, '0')}_${category}_${label}`;
+    }
+    
+    /**
+     * Create enhanced parameter documentation with better formatting
+     */
+    private createEnhancedParameterDocumentation(
+        parameter: ParameterInfo, 
+        task: TaskSymbol, 
+        options: CompletionItemOptions
+    ): MarkupContent {
+        const content: string[] = [];
+        
+        // Parameter description
+        if (parameter.description) {
+            content.push(`**${parameter.name}**`, '', parameter.description, '');
+        } else {
+            content.push(`**${parameter.name}**`, '');
+        }
+        
+        // Type information with enhanced formatting
+        if (options.showTypeDetails) {
+            const typeStr = this.taskAnalyzer.formatType(parameter.type);
+            content.push(`📋 **Type:** \`${typeStr}\``);
+            
+            // Requirement status with icons
+            if (parameter.optional) {
+                content.push(`🟡 **Optional parameter**`);
+                if (parameter.defaultValue !== undefined) {
+                    content.push(`⚙️ **Default:** \`${parameter.defaultValue}\``);
+                }
+            } else {
+                content.push(`🔴 **Required parameter**`);
+            }
+            
+            // Deprecation warning (if supported in future)
+            // if (options.includeDeprecationInfo && parameter.deprecated) {
+            //     content.push(`⚠️ **Deprecated:** ${parameter.deprecationMessage || 'This parameter is deprecated'}`);
+            // }
+        }
+        
+        // Source information
+        if (options.showSourceInfo && task.qualifiedName) {
+            content.push(`📦 **Source:** ${task.qualifiedName}`);
+        }
+        
+        // Usage examples
+        if (options.includeExamples) {
+            const example = this.generateEnhancedParameterExample(parameter);
+            if (example) {
+                content.push('', `💡 **Example:**`, '```wdl', example, '```');
+            }
+        }
+        
+        // Validation rules if available (future feature)
+        // if (parameter.validation) {
+        //     content.push('', `✅ **Validation:** ${parameter.validation}`);
+        // }
+        
+        return {
+            kind: MarkupKind.Markdown,
+            value: content.join('\n')
+        };
+    }
+    
+    /**
+     * Generate enhanced parameter example with context
+     */
+    private generateEnhancedParameterExample(parameter: ParameterInfo): string | undefined {
+        const baseType = parameter.type.name.toLowerCase();
+        const paramName = parameter.name.toLowerCase();
+        
+        // Context-aware examples
+        if (paramName.includes('input') && baseType === 'file') {
+            return `${parameter.name} = input_file`;
+        }
+        
+        if (paramName.includes('output') && baseType === 'string') {
+            return `${parameter.name} = "output_prefix"`;
+        }
+        
+        if (paramName.includes('thread') && baseType === 'int') {
+            return `${parameter.name} = 4`;
+        }
+        
+        if (paramName.includes('memory') && baseType === 'int') {
+            return `${parameter.name} = 8`;
+        }
+        
+        // Default examples by type
+        switch (baseType) {
+            case 'string':
+                return `${parameter.name} = "example_value"`;
+            case 'int':
+                return `${parameter.name} = 42`;
+            case 'float':
+                return `${parameter.name} = 3.14`;
+            case 'boolean':
+                return `${parameter.name} = true`;
+            case 'file':
+                return `${parameter.name} = input_file`;
+            case 'array':
+                return `${parameter.name} = ["item1", "item2"]`;
+            case 'map':
+                return `${parameter.name} = {"key": "value"}`;
+            default:
+                return undefined;
+        }
+    }
+    
     // Private helper methods
     
     /**
-     * Build input parameter completion item
+     * Build input parameter completion item with enhanced formatting
      */
     private buildInputParameterItem(input: ParameterInfo, task: TaskSymbol, options: CompletionItemOptions): CompletionItem {
         const typeStr = this.taskAnalyzer.formatType(input.type);
         const isRequired = !input.optional;
-        const requiredText = isRequired ? ' (required)' : ' (optional)';
+        const category = isRequired ? 'required-input' : 'optional-input';
+        const categoryInfo = this.categories.get(category)!;
         
-        let detail = `${typeStr} ${input.name}${requiredText}`;
-        if (options.showSourceInfo && task.qualifiedName) {
-            detail += ` - from ${task.qualifiedName}`;
+        // Enhanced label with icon
+        let label = input.name;
+        if (options.showIcons) {
+            label = `${categoryInfo.icon} ${input.name}`;
         }
         
+        // Enhanced detail with better formatting
+        let detail = `${typeStr}`;
+        if (isRequired) {
+            detail += ' • Required';
+        } else {
+            detail += ' • Optional';
+            if (input.defaultValue !== undefined) {
+                detail += ` • Default: ${input.defaultValue}`;
+            }
+        }
+        
+        if (options.showSourceInfo && task.qualifiedName) {
+            detail += ` • from ${task.qualifiedName}`;
+        }
+        
+        // Smart insert text generation
         let insertText = `${input.name} = `;
         if (options.includeSnippets) {
-            insertText = this.generateInputSnippet(input);
+            insertText = this.generateSmartInputSnippet(input, options);
         }
         
-        const documentation = this.createParameterDocumentation(input, options);
-        const sortText = this.generateSortText(input.name, isRequired ? 1 : 2, options);
+        const documentation = this.createEnhancedParameterDocumentation(input, task, options);
+        const sortText = this.generateSmartSortText(input.name, category, options);
         
-        return this.buildRichCompletionItem(
-            input.name,
+        // Add tags for deprecated parameters (future feature)
+        const tags: CompletionItemTag[] = [];
+        // if (options.includeDeprecationInfo && input.deprecated) {
+        //     tags.push(CompletionItemTag.Deprecated);
+        // }
+        
+        return this.buildEnhancedCompletionItem(
+            label,
             CompletionItemKind.Property,
             detail,
             documentation,
             insertText,
             sortText,
             {
-                insertTextFormat: options.includeSnippets ? InsertTextFormat.Snippet : InsertTextFormat.PlainText
+                insertTextFormat: options.includeSnippets ? InsertTextFormat.Snippet : InsertTextFormat.PlainText,
+                tags,
+                category: categoryInfo.name,
+                priority: categoryInfo.priority
             }
         );
     }
@@ -257,39 +581,226 @@ export class CompletionItemBuilder {
     }
     
     /**
-     * Build task call completion item
+     * Build enhanced task call completion item
      */
     private buildTaskCallItem(task: TaskSymbol, options: CompletionItemOptions): CompletionItem {
         const displayName = task.qualifiedName || task.name;
-        let detail = `Task: ${displayName}`;
+        const isImported = task.qualifiedName && task.qualifiedName.includes('.');
+        const category = isImported ? 'imported-task' : 'local-task';
+        const categoryInfo = this.categories.get(category)!;
         
-        if (options.showSourceInfo) {
-            if (task.qualifiedName && task.qualifiedName.includes('.')) {
-                detail += ' (imported)';
-            } else {
-                detail += ' (local)';
-            }
+        // Enhanced label with icon and metadata
+        let label = displayName;
+        if (options.showIcons) {
+            label = `${categoryInfo.icon} ${displayName}`;
         }
         
+        // Enhanced detail with input/output summary
+        const requiredInputs = task.inputs.filter(input => !input.optional);
+        const inputSummary = requiredInputs.length > 0 
+            ? `${requiredInputs.length} required input${requiredInputs.length > 1 ? 's' : ''}` 
+            : 'No required inputs';
+        const outputSummary = task.outputs.length > 0 
+            ? `${task.outputs.length} output${task.outputs.length > 1 ? 's' : ''}` 
+            : 'No outputs';
+        
+        let detail = `Task • ${inputSummary} • ${outputSummary}`;
+        
+        if (options.showSourceInfo) {
+            detail += isImported ? ' • Imported' : ' • Local';
+        }
+        
+        // Smart insert text with contextual formatting
         let insertText = displayName;
-        if (options.includeSnippets && task.inputs.length > 0) {
+        if (options.enableContextualInserts) {
+            insertText = this.generateContextualTaskCallSnippet(task, options);
+        } else if (options.includeSnippets && task.inputs.length > 0) {
             insertText = this.generateTaskCallSnippet(task);
         }
         
-        const documentation = this.createTaskDocumentation(task, options);
-        const sortText = this.generateSortText(displayName, 1, options);
+        const documentation = this.createEnhancedTaskDocumentation(task, options);
+        const sortText = this.generateSmartSortText(displayName, category, options);
         
-        return this.buildRichCompletionItem(
-            displayName,
+        return this.buildEnhancedCompletionItem(
+            label,
             CompletionItemKind.Function,
             detail,
             documentation,
             insertText,
             sortText,
             {
-                insertTextFormat: options.includeSnippets ? InsertTextFormat.Snippet : InsertTextFormat.PlainText
+                insertTextFormat: options.includeSnippets || options.enableContextualInserts 
+                    ? InsertTextFormat.Snippet 
+                    : InsertTextFormat.PlainText,
+                category: categoryInfo.name,
+                priority: categoryInfo.priority
             }
         );
+    }
+    
+    /**
+     * Generate contextual task call snippet based on usage patterns
+     */
+    private generateContextualTaskCallSnippet(task: TaskSymbol, options: CompletionItemOptions): string {
+        const taskName = task.qualifiedName || task.name;
+        const requiredInputs = task.inputs.filter(input => !input.optional);
+        const optionalInputs = task.inputs.filter(input => input.optional);
+        
+        if (requiredInputs.length === 0) {
+            return `call ${taskName}$0`;
+        }
+        
+        // Generate smart snippet with grouped parameters
+        let snippet = `call ${taskName} {\n\tinput:\n`;
+        
+        // Required inputs first
+        requiredInputs.forEach((input, index) => {
+            const placeholder = this.generateEnhancedTypePlaceholder(input.type, index + 1, input);
+            snippet += `\t\t${input.name} = ${placeholder}`;
+            if (index < requiredInputs.length - 1 || optionalInputs.length > 0) {
+                snippet += ',';
+            }
+            snippet += '\n';
+        });
+        
+        // Optional inputs with choice snippet
+        if (optionalInputs.length > 0 && optionalInputs.length <= 3) {
+            snippet += `\t\t\${${requiredInputs.length + 1}:// Optional parameters:\n`;
+            optionalInputs.forEach((input, index) => {
+                const placeholder = this.generateEnhancedTypePlaceholder(
+                    input.type, 
+                    requiredInputs.length + 2 + index, 
+                    input
+                );
+                snippet += `\t\t// ${input.name} = ${placeholder}`;
+                if (index < optionalInputs.length - 1) {
+                    snippet += ',';
+                }
+                snippet += '\n';
+            });
+            snippet += `\t\t}`;
+        }
+        
+        snippet += `}$0`;
+        
+        return snippet;
+    }
+    
+    /**
+     * Create enhanced task documentation with better structure
+     */
+    private createEnhancedTaskDocumentation(task: TaskSymbol, options: CompletionItemOptions): MarkupContent {
+        const content: string[] = [];
+        
+        // Task header with icon
+        const taskName = task.qualifiedName || task.name;
+        content.push(`# 🔧 ${taskName}`, '');
+        
+        // Task description
+        if (task.description) {
+            content.push(task.description, '');
+        }
+        
+        // Source information with enhanced formatting
+        if (options.showSourceInfo) {
+            const isImported = task.qualifiedName && task.qualifiedName.includes('.');
+            if (isImported) {
+                content.push(`📦 **Source:** Imported task`);
+                // Import path information would be available in enhanced version
+                // if (task.importPath) {
+                //     content.push(`📁 **Import Path:** \`${task.importPath}\``);
+                // }
+            } else {
+                content.push(`🏠 **Source:** Local task`);
+            }
+            content.push('');
+        }
+        
+        // Enhanced input/output documentation
+        if (options.showTypeDetails) {
+            // Required inputs
+            const requiredInputs = task.inputs.filter(input => !input.optional);
+            if (requiredInputs.length > 0) {
+                content.push(`## 🔴 Required Inputs`);
+                for (const input of requiredInputs) {
+                    const typeStr = this.taskAnalyzer.formatType(input.type);
+                    content.push(`- **\`${input.name}\`** (\`${typeStr}\`)`);
+                    if (input.description) {
+                        content.push(`  ${input.description}`);
+                    }
+                }
+                content.push('');
+            }
+            
+            // Optional inputs
+            const optionalInputs = task.inputs.filter(input => input.optional);
+            if (optionalInputs.length > 0) {
+                content.push(`## 🟡 Optional Inputs`);
+                for (const input of optionalInputs) {
+                    const typeStr = this.taskAnalyzer.formatType(input.type);
+                    let line = `- **\`${input.name}\`** (\`${typeStr}\`)`;
+                    if (input.defaultValue !== undefined) {
+                        line += ` = \`${input.defaultValue}\``;
+                    }
+                    content.push(line);
+                    if (input.description) {
+                        content.push(`  ${input.description}`);
+                    }
+                }
+                content.push('');
+            }
+            
+            // Outputs
+            if (task.outputs.length > 0) {
+                content.push(`## 📤 Outputs`);
+                for (const output of task.outputs) {
+                    const typeStr = this.taskAnalyzer.formatType(output.type);
+                    content.push(`- **\`${output.name}\`** (\`${typeStr}\`)`);
+                    if (output.description) {
+                        content.push(`  ${output.description}`);
+                    }
+                }
+                content.push('');
+            }
+        }
+        
+        // Usage example
+        if (options.includeExamples) {
+            content.push(`## 💡 Usage Example`);
+            content.push('```wdl');
+            content.push(this.generateTaskUsageExample(task));
+            content.push('```');
+        }
+        
+        return {
+            kind: MarkupKind.Markdown,
+            value: content.join('\n')
+        };
+    }
+    
+    /**
+     * Generate task usage example
+     */
+    private generateTaskUsageExample(task: TaskSymbol): string {
+        const taskName = task.qualifiedName || task.name;
+        const requiredInputs = task.inputs.filter(input => !input.optional);
+        
+        if (requiredInputs.length === 0) {
+            return `call ${taskName}`;
+        }
+        
+        let example = `call ${taskName} {\n  input:\n`;
+        
+        for (const input of requiredInputs) {
+            const exampleValue = this.generateEnhancedParameterExample(input);
+            if (exampleValue) {
+                example += `    ${exampleValue}\n`;
+            }
+        }
+        
+        example += `}`;
+        
+        return example;
     }
     
     /**
@@ -311,7 +822,7 @@ export class CompletionItemBuilder {
             insertText = this.generateTaskCallSnippet(task);
         }
         
-        const documentation = this.createEnhancedTaskDocumentation(task, options);
+        const documentation = this.createEnhancedTaskDocumentationForEnhanced(task, options);
         const sortText = this.generateSortText(displayName, task.source.type === 'local' ? 1 : 2, options);
         
         return this.buildRichCompletionItem(
@@ -589,9 +1100,9 @@ export class CompletionItemBuilder {
     }
     
     /**
-     * Create enhanced task documentation
+     * Create enhanced task documentation for EnhancedTaskSymbol
      */
-    private createEnhancedTaskDocumentation(task: EnhancedTaskSymbol, options: CompletionItemOptions): MarkupContent {
+    private createEnhancedTaskDocumentationForEnhanced(task: EnhancedTaskSymbol, options: CompletionItemOptions): MarkupContent {
         const content: string[] = [];
         
         if (task.description) {
