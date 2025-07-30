@@ -46,14 +46,16 @@ export class ImportResolver {
     private fileWatcher: FileSystemWatcher;
     private watchedDirectories: Set<string> = new Set();
     private readonly MAX_RECURSION_DEPTH = 10;
+    private readonly CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+    private readonly MAX_CACHE_SIZE = 200;
     
     constructor() {
         this.taskAnalyzer = new TaskAnalyzer();
         
         // Initialize cache manager with optimized settings
         this.cacheManager = new CacheManager<CachedImport>({
-            maxSize: 200,
-            ttl: 10 * 60 * 1000, // 10 minutes
+            maxSize: this.MAX_CACHE_SIZE,
+            ttl: this.CACHE_TTL,
             maxMemoryUsage: 100 * 1024 * 1024, // 100MB
             cleanupInterval: 2 * 60 * 1000, // 2 minutes
             enableStats: true
@@ -67,6 +69,19 @@ export class ImportResolver {
         });
         
         this.setupEventHandlers();
+    }
+    
+    /**
+     * Setup event handlers for file system watcher
+     */
+    private setupEventHandlers(): void {
+        this.fileWatcher.on('change', (event: FileChangeEvent) => {
+            this.handleImportFileChange(event.uri);
+        });
+        
+        this.fileWatcher.on('error', (error: Error) => {
+            console.warn('FileSystemWatcher error:', error);
+        });
     }
     
     /**
@@ -121,8 +136,9 @@ export class ImportResolver {
     getImportedTasks(uri: string): TaskInfo[] {
         const tasks: TaskInfo[] = [];
         
-        for (const cached of this.cache.imports.values()) {
-            if (cached.dependencies.includes(uri)) {
+        for (const key of this.cacheManager.keys()) {
+            const cached = this.cacheManager.get(key);
+            if (cached && cached.dependencies.includes(uri)) {
                 tasks.push(...cached.tasks);
             }
         }
@@ -134,58 +150,27 @@ export class ImportResolver {
      * Handle import file change by invalidating related cache entries
      */
     handleImportFileChange(importUri: string): void {
-        const toInvalidate: string[] = [];
-        
-        for (const [key, cached] of this.cache.imports) {
-            if (cached.uri === importUri || cached.dependencies.includes(importUri)) {
-                toInvalidate.push(key);
-            }
-        }
-        
-        for (const key of toInvalidate) {
-            this.cache.imports.delete(key);
-        }
+        this.cacheManager.invalidate((key, cached) => {
+            return cached.uri === importUri || cached.dependencies.includes(importUri);
+        });
     }
     
     /**
      * Clean up expired cache entries
      */
     cleanupCache(): void {
-        const now = Date.now();
-        const toDelete: string[] = [];
-        
-        for (const [key, cached] of this.cache.imports) {
-            if (now - cached.cacheTimestamp > this.CACHE_TTL) {
-                toDelete.push(key);
-            }
-        }
-        
-        for (const key of toDelete) {
-            this.cache.imports.delete(key);
-        }
-        
-        // If cache is still too large, remove oldest entries
-        if (this.cache.imports.size > this.MAX_CACHE_SIZE) {
-            const entries = Array.from(this.cache.imports.entries())
-                .sort((a, b) => a[1].cacheTimestamp - b[1].cacheTimestamp);
-            
-            const toRemove = entries.slice(0, entries.length - this.MAX_CACHE_SIZE);
-            for (const [key] of toRemove) {
-                this.cache.imports.delete(key);
-            }
-        }
-        
-        this.cache.lastCleanup = now;
+        this.cacheManager.cleanup();
     }
     
     /**
      * Get cache statistics
      */
     getCacheStats(): { size: number; hitRate: number; lastCleanup: number } {
+        const stats = this.cacheManager.getStats();
         return {
-            size: this.cache.imports.size,
-            hitRate: 0, // TODO: Implement hit rate tracking
-            lastCleanup: this.cache.lastCleanup
+            size: stats.size,
+            hitRate: stats.hitRate,
+            lastCleanup: stats.lastCleanup
         };
     }
     
@@ -193,8 +178,7 @@ export class ImportResolver {
      * Clear all cache entries
      */
     clearCache(): void {
-        this.cache.imports.clear();
-        this.cache.lastCleanup = Date.now();
+        this.cacheManager.clear();
     }
     
     // Private methods
@@ -361,15 +345,8 @@ export class ImportResolver {
      * Get cached import if valid
      */
     private getCachedImport(cacheKey: string, filePath: string): CachedImport | null {
-        const cached = this.cache.imports.get(cacheKey);
+        const cached = this.cacheManager.get(cacheKey);
         if (!cached) {
-            return null;
-        }
-        
-        // Check if cache is expired
-        const now = Date.now();
-        if (now - cached.cacheTimestamp > this.CACHE_TTL) {
-            this.cache.imports.delete(cacheKey);
             return null;
         }
         
@@ -377,12 +354,12 @@ export class ImportResolver {
         try {
             const stats = fs.statSync(filePath);
             if (stats.mtime.getTime() > cached.lastModified) {
-                this.cache.imports.delete(cacheKey);
+                this.cacheManager.delete(cacheKey);
                 return null;
             }
         } catch (error) {
             // File doesn't exist anymore
-            this.cache.imports.delete(cacheKey);
+            this.cacheManager.delete(cacheKey);
             return null;
         }
         
@@ -393,12 +370,7 @@ export class ImportResolver {
      * Cache import result
      */
     private cacheImport(cacheKey: string, cached: CachedImport): void {
-        // Clean up cache if needed
-        if (Date.now() - this.cache.lastCleanup > this.CACHE_TTL) {
-            this.cleanupCache();
-        }
-        
-        this.cache.imports.set(cacheKey, cached);
+        this.cacheManager.set(cacheKey, cached);
     }
     
     /**

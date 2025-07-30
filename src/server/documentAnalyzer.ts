@@ -1,7 +1,7 @@
 import * as AST from './ast';
 import { WDLParser } from './parser';
 import { TaskAnalyzer, TaskInfo } from './taskAnalyzer';
-import { ImportResolver } from './importResolver';
+import { ImportResolver, ImportResult } from './importResolver';
 import * as path from 'path';
 
 export interface DocumentInfo {
@@ -11,6 +11,8 @@ export interface DocumentInfo {
     tasks: TaskInfo[];
     workflows: WorkflowInfo[];
     structs: StructInfo[];
+    importErrors: ImportError[];
+    dependencyGraph: DependencyGraph;
 }
 
 export interface ImportInfo {
@@ -21,6 +23,28 @@ export interface ImportInfo {
     errors?: string[];
     lastModified?: number;
     dependencies?: string[];
+    isResolved: boolean;
+    circularDependency?: boolean;
+}
+
+export interface ImportError {
+    importPath: string;
+    error: string;
+    severity: 'error' | 'warning';
+    range?: AST.Range;
+}
+
+export interface DependencyGraph {
+    nodes: Map<string, DependencyNode>;
+    edges: Map<string, string[]>;
+    circularDependencies: string[][];
+}
+
+export interface DependencyNode {
+    uri: string;
+    imports: string[];
+    lastModified: number;
+    resolved: boolean;
 }
 
 export interface WorkflowInfo {
@@ -40,6 +64,7 @@ export class DocumentAnalyzer {
     private taskAnalyzer: TaskAnalyzer;
     private importResolver: ImportResolver;
     private documentCache: Map<string, DocumentInfo> = new Map();
+    private readonly MAX_IMPORT_DEPTH = 10;
     
     constructor() {
         this.taskAnalyzer = new TaskAnalyzer();
@@ -48,6 +73,7 @@ export class DocumentAnalyzer {
     
     /**
      * Analyze a WDL document and extract all relevant information
+     * Enhanced with async import processing and dependency graph building
      */
     async analyzeDocument(content: string, uri: string): Promise<DocumentInfo> {
         try {
@@ -60,28 +86,88 @@ export class DocumentAnalyzer {
                 imports: [],
                 tasks: [],
                 workflows: [],
-                structs: []
+                structs: [],
+                importErrors: [],
+                dependencyGraph: {
+                    nodes: new Map(),
+                    edges: new Map(),
+                    circularDependencies: []
+                }
             };
             
-            // Analyze imports asynchronously
-            for (const importDecl of ast.imports) {
-                const importInfo = await this.analyzeImport(importDecl, uri);
-                docInfo.imports.push(importInfo);
-            }
+            // Initialize dependency graph node for this document
+            docInfo.dependencyGraph.nodes.set(uri, {
+                uri,
+                imports: ast.imports.map(imp => imp.path),
+                lastModified: Date.now(),
+                resolved: false
+            });
+            
+            // Analyze imports asynchronously with enhanced error handling
+            const importPromises = ast.imports.map(importDecl => 
+                this.analyzeImportWithErrorHandling(importDecl, uri, docInfo)
+            );
+            
+            const importResults = await Promise.allSettled(importPromises);
+            
+            // Process import results and collect errors
+            importResults.forEach((result, index) => {
+                if (result.status === 'fulfilled') {
+                    docInfo.imports.push(result.value);
+                } else {
+                    const importDecl = ast.imports[index];
+                    docInfo.importErrors.push({
+                        importPath: importDecl.path,
+                        error: `Failed to analyze import: ${result.reason}`,
+                        severity: 'error',
+                        range: importDecl.range
+                    });
+                    
+                    // Still add a basic import info for partial functionality
+                    docInfo.imports.push({
+                        path: importDecl.path,
+                        alias: importDecl.alias,
+                        isResolved: false,
+                        errors: [result.reason?.toString() || 'Unknown error']
+                    });
+                }
+            });
+            
+            // Build dependency graph and detect circular dependencies
+            await this.buildDependencyGraph(docInfo);
             
             // Analyze tasks
             for (const task of ast.tasks) {
-                docInfo.tasks.push(this.taskAnalyzer.analyzeTask(task, uri));
+                try {
+                    docInfo.tasks.push(this.taskAnalyzer.analyzeTask(task, uri));
+                } catch (error) {
+                    // Log task analysis error but continue
+                    console.warn(`Failed to analyze task ${task.name} in ${uri}:`, error);
+                }
             }
             
             // Analyze workflows
             for (const workflow of ast.workflows) {
-                docInfo.workflows.push(this.analyzeWorkflow(workflow));
+                try {
+                    docInfo.workflows.push(this.analyzeWorkflow(workflow));
+                } catch (error) {
+                    console.warn(`Failed to analyze workflow ${workflow.name} in ${uri}:`, error);
+                }
             }
             
             // Analyze structs
             for (const struct of ast.structs) {
-                docInfo.structs.push(this.analyzeStruct(struct));
+                try {
+                    docInfo.structs.push(this.analyzeStruct(struct));
+                } catch (error) {
+                    console.warn(`Failed to analyze struct ${struct.name} in ${uri}:`, error);
+                }
+            }
+            
+            // Mark dependency graph node as resolved
+            const node = docInfo.dependencyGraph.nodes.get(uri);
+            if (node) {
+                node.resolved = true;
             }
             
             // Cache the document info
@@ -89,13 +175,23 @@ export class DocumentAnalyzer {
             
             return docInfo;
         } catch (error) {
-            // Return empty document info on parse error
+            // Return document info with parse error
             const docInfo: DocumentInfo = {
                 uri,
                 imports: [],
                 tasks: [],
                 workflows: [],
-                structs: []
+                structs: [],
+                importErrors: [{
+                    importPath: uri,
+                    error: `Parse error: ${error}`,
+                    severity: 'error'
+                }],
+                dependencyGraph: {
+                    nodes: new Map(),
+                    edges: new Map(),
+                    circularDependencies: []
+                }
             };
             
             this.documentCache.set(uri, docInfo);
@@ -111,16 +207,66 @@ export class DocumentAnalyzer {
     }
     
     /**
-     * Clear document cache
+     * Clear document cache with enhanced dependency tracking
      */
     clearCache(uri?: string): void {
         if (uri) {
+            const docInfo = this.documentCache.get(uri);
+            if (docInfo) {
+                // Clear dependency graph references
+                docInfo.dependencyGraph.nodes.clear();
+                docInfo.dependencyGraph.edges.clear();
+                docInfo.dependencyGraph.circularDependencies = [];
+            }
+            
             this.documentCache.delete(uri);
+            
             // Also notify ImportResolver about the change
             this.importResolver.handleImportFileChange(uri);
+            
+            // Update other documents that might depend on this one
+            this.updateDependentDocuments(uri);
         } else {
+            // Clear all caches
+            for (const docInfo of this.documentCache.values()) {
+                docInfo.dependencyGraph.nodes.clear();
+                docInfo.dependencyGraph.edges.clear();
+                docInfo.dependencyGraph.circularDependencies = [];
+            }
+            
             this.documentCache.clear();
             this.importResolver.clearCache();
+        }
+    }
+    
+    /**
+     * Update documents that depend on the changed document
+     */
+    private updateDependentDocuments(changedUri: string): void {
+        for (const [uri, docInfo] of this.documentCache) {
+            if (uri === changedUri) continue;
+            
+            // Check if this document imports the changed document
+            const hasChangedDependency = docInfo.imports.some(importInfo => 
+                importInfo.dependencies?.includes(changedUri) ||
+                importInfo.resolvedPath === changedUri
+            );
+            
+            if (hasChangedDependency) {
+                // Mark imports as needing re-resolution
+                docInfo.imports.forEach(importInfo => {
+                    if (importInfo.dependencies?.includes(changedUri) || 
+                        importInfo.resolvedPath === changedUri) {
+                        importInfo.isResolved = false;
+                        importInfo.tasks = undefined;
+                    }
+                });
+                
+                // Clear import errors that might be stale
+                docInfo.importErrors = docInfo.importErrors.filter(error => 
+                    !error.importPath.includes(changedUri)
+                );
+            }
         }
     }
     
@@ -187,16 +333,21 @@ export class DocumentAnalyzer {
     }
     
     /**
-     * Analyze an import declaration using ImportResolver
+     * Analyze an import declaration with enhanced error handling
      */
-    private async analyzeImport(importDecl: AST.ImportDeclaration, baseUri: string): Promise<ImportInfo> {
+    private async analyzeImportWithErrorHandling(
+        importDecl: AST.ImportDeclaration, 
+        baseUri: string, 
+        docInfo: DocumentInfo
+    ): Promise<ImportInfo> {
         const importInfo: ImportInfo = {
             path: importDecl.path,
-            alias: importDecl.alias
+            alias: importDecl.alias,
+            isResolved: false
         };
         
         try {
-            // Use ImportResolver to resolve the import
+            // Use ImportResolver to resolve the import with enhanced error handling
             const result = await this.importResolver.resolveImport(
                 importDecl.path, 
                 baseUri, 
@@ -207,19 +358,114 @@ export class DocumentAnalyzer {
                 importInfo.tasks = result.tasks;
                 importInfo.dependencies = result.dependencies;
                 importInfo.lastModified = result.lastModified;
+                importInfo.isResolved = true;
+                
                 if (result.dependencies.length > 0) {
                     importInfo.resolvedPath = result.dependencies[0]; // First dependency is the main file
                 }
+                
+                // Check for circular dependencies
+                if (this.hasCircularDependency(baseUri, result.dependencies)) {
+                    importInfo.circularDependency = true;
+                    docInfo.importErrors.push({
+                        importPath: importDecl.path,
+                        error: 'Circular dependency detected',
+                        severity: 'warning',
+                        range: importDecl.range
+                    });
+                }
+            } else {
+                importInfo.isResolved = false;
             }
             
             if (result.errors.length > 0) {
                 importInfo.errors = result.errors;
+                
+                // Add errors to document-level error collection
+                result.errors.forEach(error => {
+                    docInfo.importErrors.push({
+                        importPath: importDecl.path,
+                        error,
+                        severity: error.includes('not found') ? 'error' : 'warning',
+                        range: importDecl.range
+                    });
+                });
             }
         } catch (error) {
-            importInfo.errors = [`Failed to resolve import: ${error}`];
+            const errorMessage = `Failed to resolve import: ${error}`;
+            importInfo.errors = [errorMessage];
+            importInfo.isResolved = false;
+            
+            docInfo.importErrors.push({
+                importPath: importDecl.path,
+                error: errorMessage,
+                severity: 'error',
+                range: importDecl.range
+            });
         }
         
         return importInfo;
+    }
+    
+    /**
+     * Build dependency graph and detect circular dependencies
+     */
+    private async buildDependencyGraph(docInfo: DocumentInfo): Promise<void> {
+        const visited = new Set<string>();
+        const recursionStack = new Set<string>();
+        
+        // Build edges in dependency graph
+        for (const importInfo of docInfo.imports) {
+            if (importInfo.dependencies) {
+                docInfo.dependencyGraph.edges.set(docInfo.uri, importInfo.dependencies);
+                
+                // Add nodes for dependencies
+                for (const dep of importInfo.dependencies) {
+                    if (!docInfo.dependencyGraph.nodes.has(dep)) {
+                        docInfo.dependencyGraph.nodes.set(dep, {
+                            uri: dep,
+                            imports: [],
+                            lastModified: importInfo.lastModified || 0,
+                            resolved: importInfo.isResolved
+                        });
+                    }
+                }
+            }
+        }
+        
+        // Detect circular dependencies using DFS
+        const detectCycles = (uri: string, path: string[]): void => {
+            if (recursionStack.has(uri)) {
+                // Found a cycle
+                const cycleStart = path.indexOf(uri);
+                const cycle = path.slice(cycleStart).concat([uri]);
+                docInfo.dependencyGraph.circularDependencies.push(cycle);
+                return;
+            }
+            
+            if (visited.has(uri)) {
+                return;
+            }
+            
+            visited.add(uri);
+            recursionStack.add(uri);
+            
+            const dependencies = docInfo.dependencyGraph.edges.get(uri) || [];
+            for (const dep of dependencies) {
+                detectCycles(dep, [...path, uri]);
+            }
+            
+            recursionStack.delete(uri);
+        };
+        
+        detectCycles(docInfo.uri, []);
+    }
+    
+    /**
+     * Check if there's a circular dependency
+     */
+    private hasCircularDependency(baseUri: string, dependencies: string[]): boolean {
+        return dependencies.includes(baseUri);
     }
     
     /**
@@ -246,15 +492,21 @@ export class DocumentAnalyzer {
     }
     
     /**
-     * Resolve tasks from an imported file using cached results
+     * Resolve tasks from an imported file with support for nested imports
      */
-    private async resolveImportTasks(importInfo: ImportInfo, baseUri: string): Promise<TaskInfo[]> {
+    async resolveImportTasks(importInfo: ImportInfo, baseUri: string, depth: number = 0): Promise<TaskInfo[]> {
+        // Prevent infinite recursion
+        if (depth > this.MAX_IMPORT_DEPTH) {
+            console.warn(`Maximum import depth exceeded for ${importInfo.path} from ${baseUri}`);
+            return [];
+        }
+        
         // If we already have tasks from the import resolution, return them
-        if (importInfo.tasks && importInfo.tasks.length > 0) {
+        if (importInfo.tasks && importInfo.tasks.length > 0 && importInfo.isResolved) {
             return importInfo.tasks;
         }
         
-        // Otherwise, try to resolve using ImportResolver
+        // Otherwise, try to resolve using ImportResolver with nested support
         try {
             const result = await this.importResolver.resolveImport(
                 importInfo.path, 
@@ -264,10 +516,49 @@ export class DocumentAnalyzer {
             
             if (result.success) {
                 importInfo.tasks = result.tasks;
-                return result.tasks;
+                importInfo.dependencies = result.dependencies;
+                importInfo.lastModified = result.lastModified;
+                importInfo.isResolved = true;
+                
+                // Process nested imports recursively
+                const allTasks = [...result.tasks];
+                
+                // If there are nested dependencies, try to resolve their tasks too
+                if (result.dependencies && result.dependencies.length > 1) {
+                    for (let i = 1; i < result.dependencies.length; i++) {
+                        const nestedDep = result.dependencies[i];
+                        try {
+                            const nestedResult = await this.importResolver.resolveImport(
+                                nestedDep,
+                                baseUri,
+                                undefined // No alias for nested dependencies
+                            );
+                            
+                            if (nestedResult.success) {
+                                // Add nested tasks with proper prefixing
+                                const nestedTasks = nestedResult.tasks.map(task => ({
+                                    ...task,
+                                    name: importInfo.alias ? `${importInfo.alias}.${task.name}` : task.name
+                                }));
+                                allTasks.push(...nestedTasks);
+                            }
+                        } catch (nestedError) {
+                            console.warn(`Failed to resolve nested import ${nestedDep}:`, nestedError);
+                        }
+                    }
+                }
+                
+                importInfo.tasks = allTasks;
+                return allTasks;
+            } else {
+                // Mark as unresolved but store errors
+                importInfo.isResolved = false;
+                importInfo.errors = result.errors;
             }
         } catch (error) {
-            // Failed to resolve import
+            console.warn(`Failed to resolve import ${importInfo.path} from ${baseUri}:`, error);
+            importInfo.isResolved = false;
+            importInfo.errors = [`Resolution failed: ${error}`];
         }
         
         return [];
@@ -336,5 +627,136 @@ export class DocumentAnalyzer {
             
             return errors;
         });
+    }
+    
+    /**
+     * Get all import errors for a document
+     */
+    getImportErrors(uri: string): ImportError[] {
+        const docInfo = this.getCachedDocument(uri);
+        return docInfo?.importErrors || [];
+    }
+    
+    /**
+     * Get dependency graph for a document
+     */
+    getDependencyGraph(uri: string): DependencyGraph | undefined {
+        const docInfo = this.getCachedDocument(uri);
+        return docInfo?.dependencyGraph;
+    }
+    
+    /**
+     * Check if a document has circular dependencies
+     */
+    hasCircularDependencies(uri: string): boolean {
+        const docInfo = this.getCachedDocument(uri);
+        return (docInfo?.dependencyGraph?.circularDependencies?.length ?? 0) > 0;
+    }
+    
+    /**
+     * Get all circular dependency chains for a document
+     */
+    getCircularDependencies(uri: string): string[][] {
+        const docInfo = this.getCachedDocument(uri);
+        return docInfo?.dependencyGraph.circularDependencies || [];
+    }
+    
+    /**
+     * Refresh import resolution for a document
+     */
+    async refreshImports(uri: string): Promise<void> {
+        const docInfo = this.getCachedDocument(uri);
+        if (!docInfo) {
+            return;
+        }
+        
+        // Clear existing import data
+        docInfo.importErrors = [];
+        docInfo.dependencyGraph = {
+            nodes: new Map(),
+            edges: new Map(),
+            circularDependencies: []
+        };
+        
+        // Re-analyze imports
+        for (const importInfo of docInfo.imports) {
+            importInfo.isResolved = false;
+            importInfo.tasks = undefined;
+            importInfo.errors = undefined;
+            importInfo.dependencies = undefined;
+            
+            try {
+                const result = await this.importResolver.resolveImport(
+                    importInfo.path,
+                    uri,
+                    importInfo.alias
+                );
+                
+                if (result.success) {
+                    importInfo.tasks = result.tasks;
+                    importInfo.dependencies = result.dependencies;
+                    importInfo.lastModified = result.lastModified;
+                    importInfo.isResolved = true;
+                } else {
+                    importInfo.errors = result.errors;
+                    result.errors.forEach(error => {
+                        docInfo.importErrors.push({
+                            importPath: importInfo.path,
+                            error,
+                            severity: 'error'
+                        });
+                    });
+                }
+            } catch (error) {
+                const errorMessage = `Failed to refresh import: ${error}`;
+                importInfo.errors = [errorMessage];
+                docInfo.importErrors.push({
+                    importPath: importInfo.path,
+                    error: errorMessage,
+                    severity: 'error'
+                });
+            }
+        }
+        
+        // Rebuild dependency graph
+        await this.buildDependencyGraph(docInfo);
+    }
+    
+    /**
+     * Get import statistics for a document
+     */
+    getImportStatistics(uri: string): {
+        totalImports: number;
+        resolvedImports: number;
+        failedImports: number;
+        circularDependencies: number;
+        totalTasks: number;
+        importedTasks: number;
+    } {
+        const docInfo = this.getCachedDocument(uri);
+        if (!docInfo) {
+            return {
+                totalImports: 0,
+                resolvedImports: 0,
+                failedImports: 0,
+                circularDependencies: 0,
+                totalTasks: 0,
+                importedTasks: 0
+            };
+        }
+        
+        const resolvedImports = docInfo.imports.filter(imp => imp.isResolved).length;
+        const failedImports = docInfo.imports.length - resolvedImports;
+        const importedTasks = docInfo.imports.reduce((count, imp) => 
+            count + (imp.tasks?.length || 0), 0);
+        
+        return {
+            totalImports: docInfo.imports.length,
+            resolvedImports,
+            failedImports,
+            circularDependencies: docInfo.dependencyGraph.circularDependencies.length,
+            totalTasks: docInfo.tasks.length + importedTasks,
+            importedTasks
+        };
     }
 }
