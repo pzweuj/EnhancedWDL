@@ -6,6 +6,8 @@ import { SymbolProvider, TaskSymbol } from './symbolProvider';
 import { TaskAnalyzer } from './taskAnalyzer';
 import { ContextAnalyzer, CompletionContext } from './contextAnalyzer';
 import { CompletionItemBuilder, CompletionItemOptions } from './completionItemBuilder';
+import { ErrorHandler } from './errorHandler';
+import { logger } from './logger';
 
 // Performance optimization interfaces
 interface CompletionRequest {
@@ -43,6 +45,7 @@ export class CompletionProvider {
     private symbolProvider: SymbolProvider;
     private contextAnalyzer: ContextAnalyzer;
     private completionItemBuilder: CompletionItemBuilder;
+    private errorHandler: ErrorHandler;
     
     // Performance optimization properties
     private completionCache: Map<string, CompletionCache> = new Map();
@@ -71,6 +74,7 @@ export class CompletionProvider {
             showTypeDetails: true,
             includeExamples: false
         });
+        this.errorHandler = new ErrorHandler();
         
         // Initialize performance metrics
         this.performanceMetrics = {
@@ -82,45 +86,99 @@ export class CompletionProvider {
             queuedRequests: 0
         };
         
+        // Setup error handler event listeners
+        this.setupErrorHandling();
+        
         // Start memory cleanup timer
         this.startMemoryCleanup();
     }
     
     /**
-     * Provide completion items for a position in a document with performance optimizations
+     * Provide completion items for a position in a document with performance optimizations and error handling
      */
     async provideCompletionItems(document: TextDocument, line: number, character: number): Promise<CompletionItem[]> {
         const startTime = Date.now();
         const requestId = this.generateRequestId(document.uri, line, character);
         
-        try {
-            // Update metrics
-            this.performanceMetrics.totalRequests++;
-            this.performanceMetrics.activeRequests++;
-            
-            // Check cache first
-            const cacheKey = this.generateCacheKey(document, line, character);
-            const cached = this.getCachedCompletion(cacheKey);
-            if (cached) {
-                this.updateCacheHitRate(true);
-                this.performanceMetrics.activeRequests--;
-                return cached.items;
+        return await this.errorHandler.executeWithTimeout(
+            'completion-request',
+            async () => {
+                try {
+                    logger.debug('Starting completion request', 'completion', {
+                        uri: document.uri,
+                        line,
+                        character,
+                        requestId
+                    });
+                    
+                    // Update metrics
+                    this.performanceMetrics.totalRequests++;
+                    this.performanceMetrics.activeRequests++;
+                    
+                    // Check cache first
+                    const cacheKey = this.generateCacheKey(document, line, character);
+                    const cached = this.getCachedCompletion(cacheKey);
+                    if (cached) {
+                        logger.trace('Cache hit for completion request', 'completion', { cacheKey });
+                        this.updateCacheHitRate(true);
+                        this.performanceMetrics.activeRequests--;
+                        return cached.items;
+                    }
+                    
+                    this.updateCacheHitRate(false);
+                    
+                    // Use debounced completion with priority queue
+                    const result = await this.debouncedCompletion(document, line, character, requestId);
+                    
+                    logger.debug('Completion request completed', 'completion', {
+                        requestId,
+                        itemCount: result.length,
+                        responseTime: Date.now() - startTime
+                    });
+                    
+                    return result;
+                    
+                } catch (error) {
+                    // Handle error with recovery
+                    const errorReport = await this.errorHandler.handleError(
+                        error as Error,
+                        {
+                            operation: 'completion-request',
+                            uri: document.uri,
+                            timestamp: Date.now(),
+                            metadata: { line, character, requestId }
+                        },
+                        async () => {
+                            // Recovery function: return basic completions
+                            logger.warn('Attempting completion recovery', 'completion', { requestId });
+                            return this.getGeneralCompletions(document.uri);
+                        }
+                    );
+                    
+                    logger.error('Completion request failed', 'completion', {
+                        requestId,
+                        error: (error as Error).message,
+                        recovered: errorReport.recovered
+                    }, error as Error);
+                    
+                    this.performanceMetrics.activeRequests--;
+                    
+                    // Return recovery result or empty array
+                    return errorReport.recovered ? this.getGeneralCompletions(document.uri) : [];
+                    
+                } finally {
+                    // Update performance metrics
+                    const responseTime = Date.now() - startTime;
+                    this.updateAverageResponseTime(responseTime);
+                }
+            },
+            {
+                operation: 'completion-request',
+                uri: document.uri,
+                timestamp: Date.now(),
+                metadata: { line, character, requestId }
             }
-            
-            this.updateCacheHitRate(false);
-            
-            // Use debounced completion with priority queue
-            return await this.debouncedCompletion(document, line, character, requestId);
-            
-        } catch (error) {
-            console.error('Error in provideCompletionItems:', error);
-            this.performanceMetrics.activeRequests--;
-            return this.getGeneralCompletions(document.uri);
-        } finally {
-            // Update performance metrics
-            const responseTime = Date.now() - startTime;
-            this.updateAverageResponseTime(responseTime);
-        }
+        );
     }
     
     /**
@@ -996,6 +1054,131 @@ export class CompletionProvider {
             memoryUsage: 0,
             activeRequests: 0,
             queuedRequests: 0
+        };
+        
+        // Destroy error handler
+        this.errorHandler.removeAllListeners();
+    }
+    
+    /**
+     * Setup error handling event listeners
+     */
+    private setupErrorHandling(): void {
+        this.errorHandler.on('error', (errorReport) => {
+            logger.error('Error handled by ErrorHandler', 'error-handler', {
+                errorId: errorReport.id,
+                operation: errorReport.context.operation,
+                severity: errorReport.severity,
+                recovered: errorReport.recovered
+            });
+        });
+        
+        this.errorHandler.on('circuit-breaker-opened', ({ operation, failures }) => {
+            logger.warn('Circuit breaker opened', 'circuit-breaker', {
+                operation,
+                failures
+            });
+        });
+        
+        this.errorHandler.on('circuit-breaker-closed', ({ operation }) => {
+            logger.info('Circuit breaker closed', 'circuit-breaker', {
+                operation
+            });
+        });
+        
+        this.errorHandler.on('circuit-breaker-half-open', ({ operation }) => {
+            logger.info('Circuit breaker half-open', 'circuit-breaker', {
+                operation
+            });
+        });
+    }
+    
+    /**
+     * Get error handler for external access
+     */
+    getErrorHandler(): ErrorHandler {
+        return this.errorHandler;
+    }
+    
+    /**
+     * Get error statistics
+     */
+    getErrorStatistics(): any {
+        return this.errorHandler.getStatistics();
+    }
+    
+    /**
+     * Handle graceful degradation when imports fail
+     */
+    private async handleImportFailure(uri: string, error: Error): Promise<CompletionItem[]> {
+        logger.warn('Import failure detected, using graceful degradation', 'completion', {
+            uri,
+            error: error.message
+        });
+        
+        try {
+            // Try to get local tasks only
+            const localTasks = this.symbolProvider.getAllTaskSymbols();
+            if (localTasks.length > 0) {
+                return this.completionItemBuilder.buildTaskCallCompletions(localTasks);
+            }
+            
+            // Fallback to basic WDL completions
+            return this.completionItemBuilder.buildKeywordCompletions();
+            
+        } catch (fallbackError) {
+            logger.error('Fallback completion also failed', 'completion', {
+                uri,
+                originalError: error.message,
+                fallbackError: (fallbackError as Error).message
+            });
+            
+            return [];
+        }
+    }
+    
+    /**
+     * Validate completion context and handle errors
+     */
+    private async validateCompletionContext(
+        document: TextDocument,
+        line: number,
+        character: number
+    ): Promise<{ isValid: boolean; errors: string[] }> {
+        const errors: string[] = [];
+        
+        try {
+            // Check document bounds
+            const lineCount = document.lineCount;
+            if (line < 0 || line >= lineCount) {
+                errors.push(`Line ${line} is out of bounds (0-${lineCount - 1})`);
+            }
+            
+            // Check character bounds
+            if (line >= 0 && line < lineCount) {
+                const lineText = document.getText({
+                    start: { line, character: 0 },
+                    end: { line: line + 1, character: 0 }
+                });
+                
+                if (character < 0 || character > lineText.length) {
+                    errors.push(`Character ${character} is out of bounds for line ${line}`);
+                }
+            }
+            
+            // Check if document is too large
+            const documentSize = document.getText().length;
+            if (documentSize > 1024 * 1024) { // 1MB limit
+                errors.push(`Document is too large: ${Math.round(documentSize / 1024)}KB`);
+            }
+            
+        } catch (error) {
+            errors.push(`Context validation failed: ${(error as Error).message}`);
+        }
+        
+        return {
+            isValid: errors.length === 0,
+            errors
         };
     }
 
