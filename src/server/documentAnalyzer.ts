@@ -1,8 +1,8 @@
 import * as AST from './ast';
 import { WDLParser } from './parser';
 import { TaskAnalyzer, TaskInfo } from './taskAnalyzer';
+import { ImportResolver } from './importResolver';
 import * as path from 'path';
-import * as fs from 'fs';
 
 export interface DocumentInfo {
     uri: string;
@@ -18,6 +18,9 @@ export interface ImportInfo {
     alias?: string;
     resolvedPath?: string;
     tasks?: TaskInfo[];
+    errors?: string[];
+    lastModified?: number;
+    dependencies?: string[];
 }
 
 export interface WorkflowInfo {
@@ -35,16 +38,18 @@ export interface StructInfo {
 
 export class DocumentAnalyzer {
     private taskAnalyzer: TaskAnalyzer;
+    private importResolver: ImportResolver;
     private documentCache: Map<string, DocumentInfo> = new Map();
     
     constructor() {
         this.taskAnalyzer = new TaskAnalyzer();
+        this.importResolver = new ImportResolver();
     }
     
     /**
      * Analyze a WDL document and extract all relevant information
      */
-    analyzeDocument(content: string, uri: string): DocumentInfo {
+    async analyzeDocument(content: string, uri: string): Promise<DocumentInfo> {
         try {
             const parser = new WDLParser(content);
             const ast = parser.parse();
@@ -58,9 +63,10 @@ export class DocumentAnalyzer {
                 structs: []
             };
             
-            // Analyze imports
+            // Analyze imports asynchronously
             for (const importDecl of ast.imports) {
-                docInfo.imports.push(this.analyzeImport(importDecl, uri));
+                const importInfo = await this.analyzeImport(importDecl, uri);
+                docInfo.imports.push(importInfo);
             }
             
             // Analyze tasks
@@ -110,9 +116,19 @@ export class DocumentAnalyzer {
     clearCache(uri?: string): void {
         if (uri) {
             this.documentCache.delete(uri);
+            // Also notify ImportResolver about the change
+            this.importResolver.handleImportFileChange(uri);
         } else {
             this.documentCache.clear();
+            this.importResolver.clearCache();
         }
+    }
+    
+    /**
+     * Get ImportResolver instance for external use
+     */
+    getImportResolver(): ImportResolver {
+        return this.importResolver;
     }
     
     /**
@@ -171,21 +187,36 @@ export class DocumentAnalyzer {
     }
     
     /**
-     * Analyze an import declaration
+     * Analyze an import declaration using ImportResolver
      */
-    private analyzeImport(importDecl: AST.ImportDeclaration, baseUri: string): ImportInfo {
+    private async analyzeImport(importDecl: AST.ImportDeclaration, baseUri: string): Promise<ImportInfo> {
         const importInfo: ImportInfo = {
             path: importDecl.path,
             alias: importDecl.alias
         };
         
-        // Try to resolve the import path
         try {
-            const basePath = path.dirname(baseUri);
-            const resolvedPath = path.resolve(basePath, importDecl.path);
-            importInfo.resolvedPath = resolvedPath;
+            // Use ImportResolver to resolve the import
+            const result = await this.importResolver.resolveImport(
+                importDecl.path, 
+                baseUri, 
+                importDecl.alias
+            );
+            
+            if (result.success) {
+                importInfo.tasks = result.tasks;
+                importInfo.dependencies = result.dependencies;
+                importInfo.lastModified = result.lastModified;
+                if (result.dependencies.length > 0) {
+                    importInfo.resolvedPath = result.dependencies[0]; // First dependency is the main file
+                }
+            }
+            
+            if (result.errors.length > 0) {
+                importInfo.errors = result.errors;
+            }
         } catch (error) {
-            // Path resolution failed
+            importInfo.errors = [`Failed to resolve import: ${error}`];
         }
         
         return importInfo;
@@ -215,29 +246,28 @@ export class DocumentAnalyzer {
     }
     
     /**
-     * Resolve tasks from an imported file
+     * Resolve tasks from an imported file using cached results
      */
     private async resolveImportTasks(importInfo: ImportInfo, baseUri: string): Promise<TaskInfo[]> {
-        if (!importInfo.resolvedPath) {
-            return [];
+        // If we already have tasks from the import resolution, return them
+        if (importInfo.tasks && importInfo.tasks.length > 0) {
+            return importInfo.tasks;
         }
         
+        // Otherwise, try to resolve using ImportResolver
         try {
-            // Check if we already have this document cached
-            const cachedDoc = this.documentCache.get(importInfo.resolvedPath);
-            if (cachedDoc) {
-                return cachedDoc.tasks;
-            }
+            const result = await this.importResolver.resolveImport(
+                importInfo.path, 
+                baseUri, 
+                importInfo.alias
+            );
             
-            // Try to read and parse the imported file
-            if (fs.existsSync(importInfo.resolvedPath)) {
-                const content = fs.readFileSync(importInfo.resolvedPath, 'utf-8');
-                const importedDoc = this.analyzeDocument(content, importInfo.resolvedPath);
-                importInfo.tasks = importedDoc.tasks;
-                return importedDoc.tasks;
+            if (result.success) {
+                importInfo.tasks = result.tasks;
+                return result.tasks;
             }
         } catch (error) {
-            // Failed to read or parse imported file
+            // Failed to resolve import
         }
         
         return [];

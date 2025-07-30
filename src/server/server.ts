@@ -152,6 +152,28 @@ documents.onDidClose(event => {
     symbolProvider.removeDocument(event.document.uri);
 });
 
+// Handle file system changes for import files
+connection.onDidChangeWatchedFiles(async changes => {
+    for (const change of changes.changes) {
+        if (change.uri.endsWith('.wdl')) {
+            // Notify symbol provider about the change
+            symbolProvider.removeDocument(change.uri);
+            
+            // If the file still exists, re-analyze it
+            if (change.type !== 2) { // Not deleted
+                try {
+                    const document = documents.get(change.uri);
+                    if (document) {
+                        await symbolProvider.updateDocument(document.getText(), change.uri);
+                    }
+                } catch (error) {
+                    connection.console.log(`Error updating changed file ${change.uri}: ${error}`);
+                }
+            }
+        }
+    }
+});
+
 async function validateTextDocument(textDocument: TextDocument): Promise<void> {
     // Get diagnostics from the diagnostic provider
     const diagnostics = diagnosticProvider.validateDocument(textDocument);

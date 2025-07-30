@@ -1,441 +1,455 @@
 import {
-    CompletionItem,
-    CompletionItemKind,
-    InsertTextFormat,
-    MarkupContent,
-    MarkupKind
+    CompletionItem
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { SymbolProvider, TaskSymbol } from './symbolProvider';
-import { TaskAnalyzer, ParameterInfo } from './taskAnalyzer';
+import { TaskAnalyzer } from './taskAnalyzer';
+import { ContextAnalyzer, CompletionContext } from './contextAnalyzer';
+import { CompletionItemBuilder, CompletionItemOptions } from './completionItemBuilder';
 
 export class CompletionProvider {
     private symbolProvider: SymbolProvider;
-    private taskAnalyzer: TaskAnalyzer;
+    private contextAnalyzer: ContextAnalyzer;
+    private completionItemBuilder: CompletionItemBuilder;
     
     constructor(symbolProvider: SymbolProvider) {
         this.symbolProvider = symbolProvider;
-        this.taskAnalyzer = new TaskAnalyzer();
+        this.contextAnalyzer = new ContextAnalyzer();
+        this.completionItemBuilder = new CompletionItemBuilder({
+            showSourceInfo: true,
+            includeSnippets: true,
+            prioritizeRequired: true,
+            showTypeDetails: true,
+            includeExamples: false
+        });
     }
     
     /**
      * Provide completion items for a position in a document
      */
     provideCompletionItems(document: TextDocument, line: number, character: number): CompletionItem[] {
-        const text = document.getText();
-        const offset = document.offsetAt({ line, character });
-        
-        // Determine completion context
-        const context = this.getCompletionContext(text, offset);
-        
-        switch (context.type) {
-            case 'task-call':
-                return this.getTaskCompletions(document.uri);
+        try {
+            const position = { line, character };
             
-            case 'task-input':
-                return this.getTaskInputCompletions(context.taskName!, document.uri);
+            // Use ContextAnalyzer to determine completion context
+            const context = this.getCompletionContext(document, position);
             
-            case 'task-output':
-                return this.getTaskOutputCompletions(context.taskName!, document.uri);
-            
-            case 'assignment-value':
-                return this.getValueCompletions(document.uri);
-            
-            default:
-                return this.getGeneralCompletions(document.uri);
-        }
-    }
-    
-    /**
-     * Get completion context based on cursor position
-     */
-    private getCompletionContext(text: string, offset: number): CompletionContext {
-        // Look backward from cursor to understand context
-        let pos = offset - 1;
-        let braceDepth = 0;
-        let parenDepth = 0;
-        
-        // Skip whitespace
-        while (pos >= 0 && /\s/.test(text[pos])) {
-            pos--;
-        }
-        
-        if (pos < 0) {
-            return { type: 'general' };
-        }
-        
-        // Check for task output reference (after dot)
-        if (text[pos] === '.') {
-            const taskName = this.getWordBefore(text, pos);
-            if (taskName) {
-                return { type: 'task-output', taskName };
-            }
-        }
-        
-        // Check for assignment context
-        if (text[pos] === '=') {
-            return { type: 'assignment-value' };
-        }
-        
-        // Look for call context
-        const callContext = this.findCallContext(text, offset);
-        if (callContext) {
-            if (callContext.inInputBlock) {
-                return { type: 'task-input', taskName: callContext.taskName };
-            } else {
-                return { type: 'task-call' };
-            }
-        }
-        
-        // Check if we're after 'call' keyword
-        const beforeCall = this.getWordBefore(text, pos + 1);
-        if (beforeCall === 'call') {
-            return { type: 'task-call' };
-        }
-        
-        return { type: 'general' };
-    }
-    
-    /**
-     * Get task name completions
-     */
-    private getTaskCompletions(uri: string): CompletionItem[] {
-        const tasks = this.symbolProvider.getTaskSymbolsInContext(uri);
-        const completions: CompletionItem[] = [];
-        
-        for (const task of tasks) {
-            const displayName = task.qualifiedName || task.name;
-            const completion: CompletionItem = {
-                label: displayName,
-                kind: CompletionItemKind.Function,
-                detail: `Task: ${displayName}`,
-                documentation: this.createTaskDocumentation(task),
-                insertText: displayName,
-                sortText: `1_${displayName}` // Prioritize tasks
-            };
-            
-            completions.push(completion);
-        }
-        
-        return completions;
-    }
-    
-    /**
-     * Get task input parameter completions
-     */
-    private getTaskInputCompletions(taskName: string, uri: string): CompletionItem[] {
-        const task = this.symbolProvider.getTaskSymbol(taskName, uri);
-        if (!task) {
-            return [];
-        }
-        
-        const completions: CompletionItem[] = [];
-        
-        for (const input of task.inputs) {
-            const completion: CompletionItem = {
-                label: input.name,
-                kind: CompletionItemKind.Property,
-                detail: `${this.taskAnalyzer.formatType(input.type)} ${input.name}${input.optional ? ' (optional)' : ' (required)'}`,
-                documentation: this.createParameterDocumentation(input),
-                insertText: `${input.name} = `,
-                insertTextFormat: InsertTextFormat.PlainText,
-                sortText: input.optional ? `2_${input.name}` : `1_${input.name}` // Required first
-            };
-            
-            completions.push(completion);
-        }
-        
-        return completions;
-    }
-    
-    /**
-     * Get task output parameter completions
-     */
-    private getTaskOutputCompletions(taskName: string, uri: string): CompletionItem[] {
-        const task = this.symbolProvider.getTaskSymbol(taskName, uri);
-        if (!task) {
-            return [];
-        }
-        
-        const completions: CompletionItem[] = [];
-        
-        for (const output of task.outputs) {
-            const completion: CompletionItem = {
-                label: output.name,
-                kind: CompletionItemKind.Property,
-                detail: `${this.taskAnalyzer.formatType(output.type)} ${output.name}`,
-                documentation: this.createParameterDocumentation(output),
-                insertText: output.name,
-                insertTextFormat: InsertTextFormat.PlainText,
-                sortText: `1_${output.name}`
-            };
-            
-            completions.push(completion);
-        }
-        
-        return completions;
-    }
-    
-    /**
-     * Get value completions (for assignment right-hand side)
-     */
-    private getValueCompletions(uri: string): CompletionItem[] {
-        const completions: CompletionItem[] = [];
-        
-        // Add task output references
-        const tasks = this.symbolProvider.getTaskSymbolsInContext(uri);
-        for (const task of tasks) {
-            for (const output of task.outputs) {
-                const displayName = task.qualifiedName || task.name;
-                const completion: CompletionItem = {
-                    label: `${displayName}.${output.name}`,
-                    kind: CompletionItemKind.Reference,
-                    detail: `${this.taskAnalyzer.formatType(output.type)} - Output from ${displayName}`,
-                    documentation: this.createParameterDocumentation(output),
-                    insertText: `${displayName}.${output.name}`,
-                    sortText: `1_${displayName}_${output.name}`
-                };
+            // Handle different completion contexts with enhanced logic
+            switch (context.type) {
+                case 'task-call':
+                    return this.getTaskCompletions(document.uri);
                 
-                completions.push(completion);
+                case 'task-input':
+                    return this.getTaskInputCompletions(context.resolvedTaskName || context.taskName!, document.uri);
+                
+                case 'task-output':
+                    return this.getTaskOutputCompletions(context.resolvedTaskName || context.taskName!, document.uri);
+                
+                case 'assignment-value':
+                    return this.getValueCompletions(document.uri);
+                
+                default:
+                    return this.getGeneralCompletions(document.uri);
             }
+        } catch (error) {
+            // Fallback to general completions on error
+            console.error('Error in provideCompletionItems:', error);
+            return this.getGeneralCompletions(document.uri);
         }
-        
-        // Add common WDL functions
-        const functions = [
-            'select_first', 'select_all', 'defined', 'length', 'basename', 'size',
-            'glob', 'read_string', 'read_int', 'read_float', 'read_boolean',
-            'read_json', 'write_json', 'stdout', 'stderr', 'floor', 'ceil',
-            'round', 'min', 'max', 'sep', 'quote', 'squote', 'sub', 'range',
-            'transpose', 'zip', 'cross', 'unzip', 'flatten'
-        ];
-        
-        for (const func of functions) {
-            completions.push({
-                label: func,
-                kind: CompletionItemKind.Function,
-                detail: `WDL builtin function`,
-                insertText: `${func}()`,
-                insertTextFormat: InsertTextFormat.PlainText,
-                sortText: `2_${func}`
-            });
-        }
-        
-        return completions;
     }
     
     /**
-     * Get general completions (keywords, etc.)
+     * Enhanced completion context analysis using ContextAnalyzer
      */
-    private getGeneralCompletions(uri: string): CompletionItem[] {
-        const completions: CompletionItem[] = [];
-        
-        // WDL keywords
-        const keywords = [
-            'version', 'import', 'as', 'task', 'workflow', 'struct',
-            'input', 'output', 'command', 'runtime', 'meta', 'parameter_meta',
-            'call', 'if', 'else', 'scatter', 'in'
-        ];
-        
-        for (const keyword of keywords) {
-            completions.push({
-                label: keyword,
-                kind: CompletionItemKind.Keyword,
-                detail: `WDL keyword`,
-                insertText: keyword,
-                sortText: `3_${keyword}`
-            });
-        }
-        
-        // WDL types
-        const types = ['String', 'Int', 'Float', 'Boolean', 'File', 'Array', 'Map', 'Pair', 'Object'];
-        
-        for (const type of types) {
-            completions.push({
-                label: type,
-                kind: CompletionItemKind.TypeParameter,
-                detail: `WDL type`,
-                insertText: type,
-                sortText: `4_${type}`
-            });
-        }
-        
-        return completions;
-    }
-    
-    /**
-     * Create documentation for a task
-     */
-    private createTaskDocumentation(task: TaskSymbol): MarkupContent {
-        const content: string[] = [];
-        
-        if (task.description) {
-            content.push(task.description, '');
-        }
-        
-        // Input summary
-        if (task.inputs.length > 0) {
-            content.push('**Inputs:**');
-            for (const input of task.inputs) {
-                const typeStr = this.taskAnalyzer.formatType(input.type);
-                const optional = input.optional ? ' *(optional)*' : ' *(required)*';
-                content.push(`- \`${typeStr} ${input.name}\`${optional}`);
-            }
-            content.push('');
-        }
-        
-        // Output summary
-        if (task.outputs.length > 0) {
-            content.push('**Outputs:**');
-            for (const output of task.outputs) {
-                const typeStr = this.taskAnalyzer.formatType(output.type);
-                content.push(`- \`${typeStr} ${output.name}\``);
-            }
-        }
-        
-        return {
-            kind: MarkupKind.Markdown,
-            value: content.join('\n')
-        };
-    }
-    
-    /**
-     * Create documentation for a parameter
-     */
-    private createParameterDocumentation(parameter: ParameterInfo): MarkupContent {
-        const content: string[] = [];
-        
-        if (parameter.description) {
-            content.push(parameter.description, '');
-        }
-        
-        const typeStr = this.taskAnalyzer.formatType(parameter.type);
-        content.push(`**Type:** \`${typeStr}\``);
-        
-        if (parameter.defaultValue !== undefined) {
-            content.push(`**Default:** \`${parameter.defaultValue}\``);
-        }
-        
-        return {
-            kind: MarkupKind.Markdown,
-            value: content.join('\n')
-        };
-    }
-    
-    /**
-     * Find call context around a position
-     */
-    private findCallContext(text: string, offset: number): CallContext | undefined {
-        let pos = offset;
-        let braceDepth = 0;
-        let inCall = false;
-        let taskName = '';
-        let inInputBlock = false;
-        
-        // Look backward to find call statement
-        while (pos > 0) {
-            const char = text[pos];
+    private getCompletionContext(document: TextDocument, position: { line: number, character: number }): CompletionContext {
+        try {
+            // Use ContextAnalyzer to determine completion context
+            const context = this.contextAnalyzer.analyzeContext(document, position);
             
-            if (char === '}') {
-                braceDepth++;
-            } else if (char === '{') {
-                braceDepth--;
-                if (braceDepth < 0) {
-                    // Found opening brace, look for call statement
-                    const callMatch = this.findCallStatement(text, pos);
-                    if (callMatch) {
-                        taskName = callMatch.taskName;
-                        inCall = true;
-                        
-                        // Check if we're in input block
-                        const inputMatch = text.substring(pos, offset).match(/input\s*:/);
-                        inInputBlock = !!inputMatch;
-                        
-                        break;
+            // Resolve task name if needed using enhanced alias handling
+            if (context.taskName && !context.resolvedTaskName) {
+                const docInfo = this.symbolProvider.getDocumentAnalyzer().getCachedDocument(document.uri);
+                if (docInfo) {
+                    context.resolvedTaskName = this.contextAnalyzer.resolveTaskName(context.taskName, docInfo.imports);
+                    
+                    // Additional validation using SymbolProvider's enhanced methods
+                    const resolvedTask = this.symbolProvider.resolveTaskByAlias(context.taskName, document.uri);
+                    if (resolvedTask) {
+                        context.resolvedTaskName = resolvedTask.name;
                     }
                 }
             }
             
-            pos--;
+            return context;
+        } catch (error) {
+            console.error('Error in getCompletionContext:', error);
+            // Return fallback context
+            return {
+                type: 'general',
+                position,
+                confidence: 0.0
+            };
         }
-        
-        if (inCall) {
-            return { taskName, inInputBlock };
+    }
+    
+
+    
+    /**
+     * Enhanced task name completions with import and alias support
+     */
+    private getTaskCompletions(uri: string): CompletionItem[] {
+        try {
+            // Get all available tasks including imported ones
+            const tasks = this.symbolProvider.getAllAvailableTasksInContext(uri);
+            
+            if (tasks.length === 0) {
+                console.warn(`No tasks found in context: ${uri}`);
+                return this.getFallbackTaskCompletions(uri);
+            }
+            
+            // Try to get enhanced task symbols if available
+            const enhancedTasks = this.symbolProvider.getEnhancedTaskSymbolsInContext(uri);
+            if (enhancedTasks.length > 0) {
+                return this.completionItemBuilder.buildEnhancedTaskCallCompletions(enhancedTasks);
+            }
+            
+            // Fallback to regular task completions
+            return this.completionItemBuilder.buildTaskCallCompletions(tasks);
+        } catch (error) {
+            console.error(`Error getting task completions for ${uri}:`, error);
+            return this.getFallbackTaskCompletions(uri);
         }
-        
-        return undefined;
     }
     
     /**
-     * Find call statement before a position
+     * Enhanced task input parameter completions with import support
      */
-    private findCallStatement(text: string, pos: number): {taskName: string} | undefined {
-        // Look backward for "call TaskName"
-        let searchPos = pos - 1;
-        
-        // Skip whitespace
-        while (searchPos > 0 && /\s/.test(text[searchPos])) {
-            searchPos--;
-        }
-        
-        // Extract task name
-        let nameEnd = searchPos + 1;
-        while (searchPos > 0 && /[a-zA-Z0-9_.]/.test(text[searchPos])) {
-            searchPos--;
-        }
-        
-        if (searchPos >= 0) {
-            const taskName = text.substring(searchPos + 1, nameEnd);
+    private getTaskInputCompletions(taskName: string, uri: string): CompletionItem[] {
+        try {
+            // First try to get task using enhanced alias resolution
+            let task = this.symbolProvider.resolveTaskByAlias(taskName, uri);
             
-            // Skip whitespace before task name
-            while (searchPos > 0 && /\s/.test(text[searchPos])) {
-                searchPos--;
+            // Fallback to regular symbol lookup
+            if (!task) {
+                task = this.symbolProvider.getTaskSymbol(taskName, uri);
             }
             
-            // Look for "call" keyword
-            let keywordEnd = searchPos + 1;
-            while (searchPos > 0 && /[a-zA-Z]/.test(text[searchPos])) {
-                searchPos--;
+            if (!task) {
+                // Additional fallback: try to find by partial name match
+                const partialMatches = this.symbolProvider.findTasksByPartialName(taskName, uri);
+                if (partialMatches.length > 0) {
+                    task = partialMatches[0]; // Use the first match
+                }
             }
             
-            const keyword = text.substring(searchPos + 1, keywordEnd);
-            if (keyword === 'call') {
-                return { taskName };
+            if (!task) {
+                console.warn(`Task not found for input completions: ${taskName} in ${uri}`);
+                return this.getFallbackInputCompletions(taskName, uri);
             }
+            
+            // Build completions with enhanced options for imported tasks
+            const options: CompletionItemOptions = {
+                showSourceInfo: true,
+                includeSnippets: true,
+                prioritizeRequired: true,
+                showTypeDetails: true,
+                includeExamples: false
+            };
+            
+            // Check if this is an imported task to adjust display
+            const isImported = this.symbolProvider.isImportedTask(taskName, uri);
+            if (isImported) {
+                const taskSource = this.symbolProvider.getTaskSource(taskName, uri);
+                if (taskSource) {
+                    // Add source information to the completion items
+                    options.showSourceInfo = true;
+                }
+            }
+            
+            return this.completionItemBuilder.buildTaskInputCompletions(task, options);
+        } catch (error) {
+            console.error(`Error getting task input completions for ${taskName}:`, error);
+            return this.getFallbackInputCompletions(taskName, uri);
         }
-        
-        return undefined;
     }
     
     /**
-     * Get word before a position
+     * Enhanced task output parameter completions with alias handling
      */
-    private getWordBefore(text: string, pos: number): string | undefined {
-        let end = pos;
-        
-        // Skip whitespace
-        while (end > 0 && /\s/.test(text[end - 1])) {
-            end--;
+    private getTaskOutputCompletions(taskName: string, uri: string): CompletionItem[] {
+        try {
+            // Enhanced task resolution with alias support
+            let task = this.symbolProvider.resolveTaskByAlias(taskName, uri);
+            
+            // Fallback to regular symbol lookup
+            if (!task) {
+                task = this.symbolProvider.getTaskSymbol(taskName, uri);
+            }
+            
+            if (!task) {
+                // Try qualified name lookup
+                const qualifiedName = this.symbolProvider.getQualifiedTaskName(taskName, uri);
+                if (qualifiedName) {
+                    task = this.symbolProvider.getTaskSymbol(qualifiedName, uri);
+                }
+            }
+            
+            if (!task) {
+                // Additional fallback: search by partial name
+                const partialMatches = this.symbolProvider.findTasksByPartialName(taskName, uri);
+                if (partialMatches.length > 0) {
+                    task = partialMatches[0];
+                }
+            }
+            
+            if (!task) {
+                console.warn(`Task not found for output completions: ${taskName} in ${uri}`);
+                return this.getFallbackOutputCompletions(taskName, uri);
+            }
+            
+            // Enhanced completion options for alias tasks
+            const options: CompletionItemOptions = {
+                showSourceInfo: true,
+                includeSnippets: false, // Output completions don't need snippets
+                prioritizeRequired: false, // All outputs are equally important
+                showTypeDetails: true,
+                includeExamples: false
+            };
+            
+            // Add alias information if applicable
+            const taskSource = this.symbolProvider.getTaskSource(taskName, uri);
+            if (taskSource && taskSource.type === 'imported') {
+                options.showSourceInfo = true;
+            }
+            
+            return this.completionItemBuilder.buildTaskOutputCompletions(task, options);
+        } catch (error) {
+            console.error(`Error getting task output completions for ${taskName}:`, error);
+            return this.getFallbackOutputCompletions(taskName, uri);
         }
-        
-        let start = end;
-        while (start > 0 && /[a-zA-Z0-9_]/.test(text[start - 1])) {
-            start--;
-        }
-        
-        if (start < end) {
-            return text.substring(start, end);
-        }
-        
-        return undefined;
     }
+    
+    /**
+     * Enhanced value completions with import support
+     */
+    private getValueCompletions(uri: string): CompletionItem[] {
+        try {
+            const completions: CompletionItem[] = [];
+            
+            // Add task output references with enhanced alias support
+            const tasks = this.symbolProvider.getAllAvailableTasksInContext(uri);
+            if (tasks.length > 0) {
+                const outputCompletions = this.completionItemBuilder.buildTaskOutputReferenceCompletions(tasks);
+                completions.push(...outputCompletions);
+            }
+            
+            // Add builtin functions
+            const functionCompletions = this.completionItemBuilder.buildBuiltinFunctionCompletions();
+            completions.push(...functionCompletions);
+            
+            // Add WDL types for type annotations
+            const typeCompletions = this.completionItemBuilder.buildTypeCompletions();
+            completions.push(...typeCompletions);
+            
+            return completions;
+        } catch (error) {
+            console.error('Error getting value completions:', error);
+            // Fallback to basic function completions
+            return this.completionItemBuilder.buildBuiltinFunctionCompletions();
+        }
+    }
+    
+    /**
+     * Enhanced general completions with context awareness
+     */
+    private getGeneralCompletions(uri: string): CompletionItem[] {
+        try {
+            const completions: CompletionItem[] = [];
+            
+            // Add WDL keywords
+            const keywordCompletions = this.completionItemBuilder.buildKeywordCompletions();
+            completions.push(...keywordCompletions);
+            
+            // Add WDL types
+            const typeCompletions = this.completionItemBuilder.buildTypeCompletions();
+            completions.push(...typeCompletions);
+            
+            // Add available tasks for general context
+            const tasks = this.symbolProvider.getAllAvailableTasksInContext(uri);
+            if (tasks.length > 0) {
+                const taskCompletions = this.completionItemBuilder.buildTaskCallCompletions(tasks);
+                completions.push(...taskCompletions);
+            }
+            
+            // Add builtin functions
+            const functionCompletions = this.completionItemBuilder.buildBuiltinFunctionCompletions();
+            completions.push(...functionCompletions);
+            
+            return completions;
+        } catch (error) {
+            console.error('Error getting general completions:', error);
+            // Fallback to basic keyword completions
+            return this.completionItemBuilder.buildKeywordCompletions();
+        }
+    }
+    
+    /**
+     * Get completion item builder for external use
+     */
+    getCompletionItemBuilder(): CompletionItemBuilder {
+        return this.completionItemBuilder;
+    }
+    
+    /**
+     * Fallback input completions when task is not found
+     */
+    private getFallbackInputCompletions(taskName: string, uri: string): CompletionItem[] {
+        try {
+            // Try to find similar task names
+            const allTasks = this.symbolProvider.getAllAvailableTasksInContext(uri);
+            const similarTasks = allTasks.filter(task => {
+                const originalName = this.extractOriginalTaskName(task.name);
+                return originalName.toLowerCase().includes(taskName.toLowerCase()) ||
+                       taskName.toLowerCase().includes(originalName.toLowerCase());
+            });
+            
+            if (similarTasks.length > 0) {
+                // Return completions for the most similar task
+                const bestMatch = similarTasks[0];
+                return this.completionItemBuilder.buildTaskInputCompletions(bestMatch);
+            }
+            
+            // Return empty array if no similar tasks found
+            return [];
+        } catch (error) {
+            console.error('Error in getFallbackInputCompletions:', error);
+            return [];
+        }
+    }
+    
+    /**
+     * Fallback output completions when task is not found
+     */
+    private getFallbackOutputCompletions(taskName: string, uri: string): CompletionItem[] {
+        try {
+            // Try to find similar task names
+            const allTasks = this.symbolProvider.getAllAvailableTasksInContext(uri);
+            const similarTasks = allTasks.filter(task => {
+                const originalName = this.extractOriginalTaskName(task.name);
+                return originalName.toLowerCase().includes(taskName.toLowerCase()) ||
+                       taskName.toLowerCase().includes(originalName.toLowerCase());
+            });
+            
+            if (similarTasks.length > 0) {
+                // Return completions for the most similar task
+                const bestMatch = similarTasks[0];
+                return this.completionItemBuilder.buildTaskOutputCompletions(bestMatch);
+            }
+            
+            // Return empty array if no similar tasks found
+            return [];
+        } catch (error) {
+            console.error('Error in getFallbackOutputCompletions:', error);
+            return [];
+        }
+    }
+    
+    /**
+     * Fallback task completions when no tasks are found
+     */
+    private getFallbackTaskCompletions(uri: string): CompletionItem[] {
+        try {
+            // Try to get all task symbols from the symbol table
+            const allTasks = this.symbolProvider.getAllTaskSymbols();
+            
+            if (allTasks.length > 0) {
+                return this.completionItemBuilder.buildTaskCallCompletions(allTasks);
+            }
+            
+            // Return basic WDL keywords as last resort
+            return this.completionItemBuilder.buildKeywordCompletions();
+        } catch (error) {
+            console.error('Error in getFallbackTaskCompletions:', error);
+            return [];
+        }
+    }
+    
+    /**
+     * Extract original task name without alias prefix
+     */
+    private extractOriginalTaskName(taskName: string): string {
+        if (taskName.includes('.')) {
+            const parts = taskName.split('.');
+            return parts[parts.length - 1]; // Return the last part
+        }
+        return taskName;
+    }
+    
+    /**
+     * Validate task reference with detailed error information
+     */
+    validateTaskReference(taskName: string, contextUri: string): {
+        isValid: boolean;
+        error?: string;
+        suggestions?: string[];
+    } {
+        try {
+            return this.symbolProvider.validateTaskReferenceDetailed(taskName, contextUri);
+        } catch (error) {
+            console.error('Error validating task reference:', error);
+            return {
+                isValid: false,
+                error: 'Internal error during validation',
+                suggestions: []
+            };
+        }
+    }
+    
+    /**
+     * Get available import aliases in context
+     */
+    getAvailableAliases(contextUri: string): string[] {
+        try {
+            return this.symbolProvider.getAvailableAliases(contextUri);
+        } catch (error) {
+            console.error('Error getting available aliases:', error);
+            return [];
+        }
+    }
+    
+    /**
+     * Get tasks for a specific alias
+     */
+    getTasksForAlias(alias: string, contextUri: string): TaskSymbol[] {
+        try {
+            return this.symbolProvider.getTasksForAlias(alias, contextUri);
+        } catch (error) {
+            console.error('Error getting tasks for alias:', error);
+            return [];
+        }
+    }
+    
+    /**
+     * Check if completion provider is ready
+     */
+    isReady(): boolean {
+        return this.symbolProvider !== undefined && 
+               this.contextAnalyzer !== undefined && 
+               this.completionItemBuilder !== undefined;
+    }
+    
+    /**
+     * Get completion statistics for debugging
+     */
+    getStatistics(): {
+        symbolProviderStats: any;
+        isReady: boolean;
+    } {
+        return {
+            symbolProviderStats: this.symbolProvider.getStatistics(),
+            isReady: this.isReady()
+        };
+    }
+
 }
 
-interface CompletionContext {
-    type: 'general' | 'task-call' | 'task-input' | 'task-output' | 'assignment-value';
-    taskName?: string;
-}
-
-interface CallContext {
-    taskName: string;
-    inInputBlock: boolean;
-}
