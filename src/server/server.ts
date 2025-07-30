@@ -220,13 +220,13 @@ connection.onCompletionResolve(
 
 // This handler provides hover information
 connection.onHover(
-    (params: HoverParams): Hover | undefined => {
+    async (params: HoverParams): Promise<Hover | null> => {
         const document = documents.get(params.textDocument.uri);
         if (!document) {
-            return undefined;
+            return null;
         }
         
-        return hoverProvider.provideHover(
+        return await hoverProvider.provideHover(
             document,
             params.position.line,
             params.position.character
