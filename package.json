@@ -2,7 +2,7 @@
   "name": "enhancedwdl",
   "displayName": "EnhancedWDL",
   "description": "Professional syntax highlighting and language support for WDL (Workflow Description Language) files with enhanced features",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "publisher": "pzweuj",
   "repository": {
     "type": "git",
@@ -60,7 +60,9 @@
     "compile": "npx tsc -p ./",
     "watch": "npx tsc -watch -p ./",
     "package": "vsce package",
-    "build": "npm run compile && npm run package"
+    "build": "npm run compile && npm run package",
+    "test": "jest",
+    "test:watch": "jest --watch"
   },
   "devDependencies": {
     "@types/node": "^18.0.0",
@@ -71,5 +73,19 @@
     "vscode-languageclient": "^8.0.0",
     "vscode-languageserver": "^8.0.0",
     "vscode-languageserver-textdocument": "^1.0.0"
+  },
+  "jest": {
+    "preset": "ts-jest",
+    "testEnvironment": "node",
+    "roots": ["<rootDir>/src"],
+    "testMatch": ["**/__tests__/**/*.ts", "**/?(*.)+(spec|test).ts"],
+    "transform": {
+      "^.+\\.ts$": "ts-jest"
+    },
+    "collectCoverageFrom": [
+      "src/**/*.ts",
+      "!src/**/*.d.ts",
+      "!src/**/*.test.ts"
+    ]
   }
 }

@@ -1,5 +1,5 @@
 import { DocumentAnalyzer, DocumentInfo } from './documentAnalyzer';
-import { TaskInfo, ParameterInfo } from './taskAnalyzer';
+import { TaskInfo, ParameterInfo, TypeInfo } from './taskAnalyzer';
 import { PersistentCacheManager } from './persistentCacheManager';
 import * as AST from './ast';
 
@@ -8,6 +8,24 @@ export interface TaskSource {
     sourceFile: string;
     importAlias?: string;
     importPath?: string;
+}
+
+export interface TaskInputSymbol {
+    name: string;
+    type: AST.WDLType;
+    typeInfo: TypeInfo;
+    isRequired: boolean;
+    defaultValue?: any;
+    description?: string;
+    range: AST.Range;
+}
+
+export interface TaskOutputSymbol {
+    name: string;
+    type: AST.WDLType;
+    typeInfo: TypeInfo;
+    description?: string;
+    range: AST.Range;
 }
 
 export interface EnhancedTaskSymbol extends TaskSymbol {
@@ -28,6 +46,12 @@ export interface EnhancedTaskSymbol extends TaskSymbol {
     
     // Cache timestamp
     cacheTimestamp: number;
+    
+    // Enhanced symbol information
+    inputSymbols: TaskInputSymbol[];
+    outputSymbols: TaskOutputSymbol[];
+    importInfo?: any; // Import information from DocumentInfo
+    isLocal: boolean;
 }
 
 export interface TaskSymbol {
@@ -636,6 +660,8 @@ export class SymbolProvider {
      */
     createEnhancedTaskSymbol(task: TaskInfo, source: TaskSource): EnhancedTaskSymbol {
         const originalName = this.extractOriginalTaskName(task.name);
+        const inputSymbols = task.inputs.map(input => this.parameterInfoToInputSymbol(input));
+        const outputSymbols = task.outputs.map(output => this.parameterInfoToOutputSymbol(output));
         
         return {
             name: task.name,
@@ -650,7 +676,11 @@ export class SymbolProvider {
             originalName,
             fullyQualifiedName: task.name,
             importPath: source.importPath,
-            cacheTimestamp: Date.now()
+            cacheTimestamp: Date.now(),
+            inputSymbols,
+            outputSymbols,
+            importInfo: undefined,
+            isLocal: source.type === 'local'
         };
     }
     
@@ -1005,5 +1035,225 @@ export class SymbolProvider {
             return parts.slice(0, -1).join('.'); // Return all parts except the last one
         }
         return undefined;
+    }
+    
+    /**
+     * Get task input symbols with detailed type information
+     */
+    getTaskInputSymbols(taskName: string, contextUri: string): TaskInputSymbol[] {
+        const taskSymbol = this.getTaskSymbol(taskName, contextUri);
+        if (!taskSymbol) {
+            return [];
+        }
+        
+        return taskSymbol.inputs.map(input => this.parameterInfoToInputSymbol(input));
+    }
+    
+    /**
+     * Get task output symbols with detailed type information
+     */
+    getTaskOutputSymbols(taskName: string, contextUri: string): TaskOutputSymbol[] {
+        const taskSymbol = this.getTaskSymbol(taskName, contextUri);
+        if (!taskSymbol) {
+            return [];
+        }
+        
+        return taskSymbol.outputs.map(output => this.parameterInfoToOutputSymbol(output));
+    }
+    
+    /**
+     * Resolve task with alias support and return enhanced symbol
+     */
+    resolveTaskWithAlias(taskName: string, contextUri: string): EnhancedTaskSymbol | undefined {
+        const docInfo = this.documentAnalyzer.getCachedDocument(contextUri);
+        if (!docInfo) {
+            return undefined;
+        }
+        
+        // Check if taskName contains alias (e.g., "utils.ValidateFile")
+        if (taskName.includes('.')) {
+            const parts = taskName.split('.');
+            const alias = parts[0];
+            const originalTaskName = parts.slice(1).join('.');
+            
+            // Find the import with this alias
+            for (const importInfo of docInfo.imports) {
+                if (importInfo.alias === alias && importInfo.tasks) {
+                    for (const task of importInfo.tasks) {
+                        // Check if the task name matches (considering it might already have alias prefix)
+                        if (task.name === taskName || task.name.endsWith(originalTaskName)) {
+                            const source: TaskSource = {
+                                type: 'imported',
+                                sourceFile: task.sourceFile,
+                                importAlias: importInfo.alias,
+                                importPath: importInfo.path
+                            };
+                            return this.createEnhancedTaskSymbolFromTaskInfo(task, source, importInfo);
+                        }
+                    }
+                }
+            }
+        } else {
+            // Check local tasks first
+            for (const task of docInfo.tasks) {
+                if (task.name === taskName) {
+                    const source: TaskSource = {
+                        type: 'local',
+                        sourceFile: task.sourceFile
+                    };
+                    return this.createEnhancedTaskSymbolFromTaskInfo(task, source);
+                }
+            }
+            
+            // Check imported tasks without alias
+            for (const importInfo of docInfo.imports) {
+                if (!importInfo.alias && importInfo.tasks) {
+                    for (const task of importInfo.tasks) {
+                        if (task.name === taskName) {
+                            const source: TaskSource = {
+                                type: 'imported',
+                                sourceFile: task.sourceFile,
+                                importPath: importInfo.path
+                            };
+                            return this.createEnhancedTaskSymbolFromTaskInfo(task, source, importInfo);
+                        }
+                    }
+                }
+            }
+            
+            // Check if taskName matches the original name of any imported task
+            for (const importInfo of docInfo.imports) {
+                if (importInfo.tasks) {
+                    for (const task of importInfo.tasks) {
+                        const originalName = this.extractOriginalTaskName(task.name);
+                        if (originalName === taskName) {
+                            const source: TaskSource = {
+                                type: 'imported',
+                                sourceFile: task.sourceFile,
+                                importAlias: importInfo.alias,
+                                importPath: importInfo.path
+                            };
+                            return this.createEnhancedTaskSymbolFromTaskInfo(task, source, importInfo);
+                        }
+                    }
+                }
+            }
+        }
+        
+        return undefined;
+    }
+    
+    /**
+     * Get available input parameters, filtering out already used ones
+     */
+    getAvailableInputParameters(taskName: string, contextUri: string, usedInputs: string[]): TaskInputSymbol[] {
+        const inputSymbols = this.getTaskInputSymbols(taskName, contextUri);
+        
+        // Filter out already used inputs
+        return inputSymbols.filter(input => !usedInputs.includes(input.name));
+    }
+    
+    /**
+     * Convert ParameterInfo to TaskInputSymbol
+     */
+    private parameterInfoToInputSymbol(param: ParameterInfo): TaskInputSymbol {
+        return {
+            name: param.name,
+            type: this.typeInfoToWDLType(param.type),
+            typeInfo: param.type,
+            isRequired: !param.optional,
+            defaultValue: param.defaultValue,
+            description: param.description,
+            range: this.createDummyRange() // We don't have range info in ParameterInfo
+        };
+    }
+    
+    /**
+     * Convert ParameterInfo to TaskOutputSymbol
+     */
+    private parameterInfoToOutputSymbol(param: ParameterInfo): TaskOutputSymbol {
+        return {
+            name: param.name,
+            type: this.typeInfoToWDLType(param.type),
+            typeInfo: param.type,
+            description: param.description,
+            range: this.createDummyRange() // We don't have range info in ParameterInfo
+        };
+    }
+    
+    /**
+     * Create enhanced task symbol from TaskInfo
+     */
+    private createEnhancedTaskSymbolFromTaskInfo(task: TaskInfo, source: TaskSource, importInfo?: any): EnhancedTaskSymbol {
+        const originalName = this.extractOriginalTaskName(task.name);
+        const inputSymbols = task.inputs.map(input => this.parameterInfoToInputSymbol(input));
+        const outputSymbols = task.outputs.map(output => this.parameterInfoToOutputSymbol(output));
+        
+        return {
+            name: task.name,
+            inputs: task.inputs,
+            outputs: task.outputs,
+            description: task.description,
+            sourceFile: task.sourceFile,
+            range: task.range,
+            qualifiedName: task.name,
+            source,
+            importAlias: source.importAlias,
+            originalName,
+            fullyQualifiedName: task.name,
+            importPath: source.importPath,
+            cacheTimestamp: Date.now(),
+            inputSymbols,
+            outputSymbols,
+            importInfo,
+            isLocal: source.type === 'local'
+        };
+    }
+    
+    /**
+     * Convert TypeInfo to WDLType (simplified conversion)
+     */
+    private typeInfoToWDLType(typeInfo: TypeInfo): AST.WDLType {
+        const range = this.createDummyRange();
+        
+        // Handle primitive types
+        if (typeInfo.name === 'String' || typeInfo.name === 'Int' || 
+            typeInfo.name === 'Float' || typeInfo.name === 'Boolean' || 
+            typeInfo.name === 'File') {
+            return new AST.PrimitiveType(range, typeInfo.name as any, typeInfo.optional);
+        }
+        
+        // Handle array types
+        if (typeInfo.arrayElementType) {
+            const elementType = this.typeInfoToWDLType(typeInfo.arrayElementType);
+            return new AST.ArrayType(range, elementType, typeInfo.optional);
+        }
+        
+        // Handle map types
+        if (typeInfo.mapKeyType && typeInfo.mapValueType) {
+            const keyType = this.typeInfoToWDLType(typeInfo.mapKeyType);
+            const valueType = this.typeInfoToWDLType(typeInfo.mapValueType);
+            return new AST.MapType(range, keyType, valueType, typeInfo.optional);
+        }
+        
+        // Handle pair types
+        if (typeInfo.pairLeftType && typeInfo.pairRightType) {
+            const leftType = this.typeInfoToWDLType(typeInfo.pairLeftType);
+            const rightType = this.typeInfoToWDLType(typeInfo.pairRightType);
+            return new AST.PairType(range, leftType, rightType, typeInfo.optional);
+        }
+        
+        // Handle custom types
+        return new AST.CustomType(range, typeInfo.name, typeInfo.optional);
+    }
+    
+    /**
+     * Create a dummy range for cases where we don't have position information
+     */
+    private createDummyRange(): AST.Range {
+        return {
+            start: { line: 0, column: 0, offset: 0 },
+            end: { line: 0, column: 0, offset: 0 }
+        };
     }
 }

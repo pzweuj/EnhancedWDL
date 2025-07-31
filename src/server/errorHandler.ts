@@ -6,6 +6,15 @@ export interface ErrorContext {
     timestamp: number;
     stackTrace?: string;
     metadata?: Record<string, any>;
+    performanceMetrics?: PerformanceMetrics;
+}
+
+export interface PerformanceMetrics {
+    startTime: number;
+    endTime?: number;
+    duration?: number;
+    memoryUsage?: NodeJS.MemoryUsage;
+    cpuUsage?: NodeJS.CpuUsage;
 }
 
 export interface ErrorReport {
@@ -35,12 +44,14 @@ export class ErrorHandler extends EventEmitter {
     private errorReports: ErrorReport[] = [];
     private timeoutConfigs: Map<string, TimeoutConfig> = new Map();
     private circuitBreakers: Map<string, CircuitBreakerState> = new Map();
+    private performanceMonitor: PerformanceMonitor = new PerformanceMonitor();
     private readonly MAX_ERROR_REPORTS = 1000;
     
     constructor() {
         super();
         this.initializeDefaultTimeouts();
         this.startCleanupTimer();
+        this.startPerformanceMonitoring();
     }
     
     /**
@@ -253,11 +264,26 @@ export class ErrorHandler extends EventEmitter {
             };
         }
         
-        // Parse error recovery
+        // Parse error recovery - Enhanced for best-effort completion
         if (errorMessage.includes('parse') || errorMessage.includes('syntax')) {
+            // For completion requests, we can still provide basic completions
+            if (context.operation === 'completion-request') {
+                return {
+                    success: true,
+                    action: 'Parse error - providing best-effort completions'
+                };
+            }
             return {
                 success: false,
                 action: 'Syntax error - manual correction required'
+            };
+        }
+        
+        // Task not found recovery - Enhanced with suggestions
+        if (errorMessage.includes('task not found') || errorMessage.includes('symbol not found')) {
+            return {
+                success: true,
+                action: 'Task not found - providing similar task suggestions'
             };
         }
         
@@ -266,6 +292,14 @@ export class ErrorHandler extends EventEmitter {
             return {
                 success: false,
                 action: 'Network error - retry after delay'
+            };
+        }
+        
+        // Completion-specific error recovery
+        if (context.operation === 'completion-request') {
+            return {
+                success: true,
+                action: 'Completion error - providing fallback completions'
             };
         }
         
@@ -543,6 +577,215 @@ export class ErrorHandler extends EventEmitter {
         const cutoffTime = Date.now() - 24 * 60 * 60 * 1000; // 24 hours
         this.errorReports = this.errorReports.filter(report => report.timestamp > cutoffTime);
     }
+    
+    /**
+     * Start performance monitoring
+     */
+    private startPerformanceMonitoring(): void {
+        this.performanceMonitor.startMonitoring();
+        
+        // Listen for performance warnings
+        process.on('performance-warning' as any, (warning: any) => {
+            this.emit('performance-warning', warning);
+        });
+    }
+    
+    /**
+     * Create performance metrics for operation
+     */
+    createPerformanceMetrics(): PerformanceMetrics {
+        return {
+            startTime: Date.now(),
+            memoryUsage: process.memoryUsage(),
+            cpuUsage: process.cpuUsage()
+        };
+    }
+    
+    /**
+     * Complete performance metrics
+     */
+    completePerformanceMetrics(metrics: PerformanceMetrics): PerformanceMetrics {
+        const endTime = Date.now();
+        return {
+            ...metrics,
+            endTime,
+            duration: endTime - metrics.startTime,
+            memoryUsage: process.memoryUsage(),
+            cpuUsage: process.cpuUsage(metrics.cpuUsage)
+        };
+    }
+    
+    /**
+     * Record operation performance
+     */
+    recordOperationPerformance(
+        operation: string,
+        duration: number,
+        success: boolean,
+        isTimeout: boolean = false,
+        memoryUsage?: NodeJS.MemoryUsage
+    ): void {
+        this.performanceMonitor.recordOperation(operation, duration, success, isTimeout, memoryUsage);
+    }
+    
+    /**
+     * Get performance metrics for operation
+     */
+    getOperationPerformance(operation: string): OperationPerformance | undefined {
+        return this.performanceMonitor.getOperationMetrics(operation);
+    }
+    
+    /**
+     * Get all performance metrics
+     */
+    getAllPerformanceMetrics(): OperationPerformance[] {
+        return this.performanceMonitor.getAllMetrics();
+    }
+    
+    /**
+     * Get system health status
+     */
+    getSystemHealth(): {
+        memoryUsage: NodeJS.MemoryUsage;
+        cpuUsage: NodeJS.CpuUsage;
+        uptime: number;
+        isHealthy: boolean;
+        warnings: string[];
+    } {
+        return this.performanceMonitor.getSystemHealth();
+    }
+    
+    /**
+     * Check if system is under memory pressure
+     */
+    isMemoryPressure(): boolean {
+        const health = this.getSystemHealth();
+        return health.warnings.some(warning => warning.includes('memory'));
+    }
+    
+    /**
+     * Get best-effort completion suggestions when task not found
+     */
+    getTaskNotFoundSuggestions(
+        taskName: string,
+        availableTasks: string[]
+    ): string[] {
+        const suggestions: string[] = [];
+        const lowerTaskName = taskName.toLowerCase();
+        
+        // Exact case-insensitive match
+        for (const task of availableTasks) {
+            if (task.toLowerCase() === lowerTaskName) {
+                suggestions.push(task);
+            }
+        }
+        
+        // Partial matches
+        for (const task of availableTasks) {
+            const lowerTask = task.toLowerCase();
+            if (lowerTask.includes(lowerTaskName) || lowerTaskName.includes(lowerTask)) {
+                if (!suggestions.includes(task)) {
+                    suggestions.push(task);
+                }
+            }
+        }
+        
+        // Levenshtein distance based suggestions
+        const distanceMatches = availableTasks
+            .map(task => ({
+                task,
+                distance: this.calculateLevenshteinDistance(lowerTaskName, task.toLowerCase())
+            }))
+            .filter(item => item.distance <= 3) // Max 3 character differences
+            .sort((a, b) => a.distance - b.distance)
+            .map(item => item.task);
+        
+        for (const task of distanceMatches) {
+            if (!suggestions.includes(task)) {
+                suggestions.push(task);
+            }
+        }
+        
+        // Limit to top 5 suggestions
+        return suggestions.slice(0, 5);
+    }
+    
+    /**
+     * Calculate Levenshtein distance between two strings
+     */
+    private calculateLevenshteinDistance(str1: string, str2: string): number {
+        const matrix = Array(str2.length + 1).fill(null).map(() => Array(str1.length + 1).fill(null));
+        
+        for (let i = 0; i <= str1.length; i++) {
+            matrix[0][i] = i;
+        }
+        
+        for (let j = 0; j <= str2.length; j++) {
+            matrix[j][0] = j;
+        }
+        
+        for (let j = 1; j <= str2.length; j++) {
+            for (let i = 1; i <= str1.length; i++) {
+                const indicator = str1[i - 1] === str2[j - 1] ? 0 : 1;
+                matrix[j][i] = Math.min(
+                    matrix[j][i - 1] + 1, // deletion
+                    matrix[j - 1][i] + 1, // insertion
+                    matrix[j - 1][i - 1] + indicator // substitution
+                );
+            }
+        }
+        
+        return matrix[str2.length][str1.length];
+    }
+    
+    /**
+     * Provide best-effort completions during parse errors
+     */
+    getBestEffortCompletions(): Array<{
+        label: string;
+        kind: number;
+        detail: string;
+        insertText: string;
+    }> {
+        return [
+            {
+                label: 'workflow',
+                kind: 14, // CompletionItemKind.Keyword
+                detail: 'WDL workflow definition',
+                insertText: 'workflow ${1:WorkflowName} {\n\t$0\n}'
+            },
+            {
+                label: 'task',
+                kind: 14, // CompletionItemKind.Keyword
+                detail: 'WDL task definition',
+                insertText: 'task ${1:TaskName} {\n\tinput {\n\t\t$2\n\t}\n\tcommand {\n\t\t$3\n\t}\n\toutput {\n\t\t$4\n\t}\n}'
+            },
+            {
+                label: 'call',
+                kind: 14, // CompletionItemKind.Keyword
+                detail: 'Call a task',
+                insertText: 'call ${1:TaskName} {\n\tinput:\n\t\t$2\n}'
+            },
+            {
+                label: 'import',
+                kind: 14, // CompletionItemKind.Keyword
+                detail: 'Import external WDL file',
+                insertText: 'import "${1:path/to/file.wdl}" as ${2:alias}'
+            },
+            {
+                label: 'scatter',
+                kind: 14, // CompletionItemKind.Keyword
+                detail: 'Scatter over collection',
+                insertText: 'scatter (${1:item} in ${2:collection}) {\n\t$3\n}'
+            },
+            {
+                label: 'if',
+                kind: 14, // CompletionItemKind.Keyword
+                detail: 'Conditional execution',
+                insertText: 'if (${1:condition}) {\n\t$2\n}'
+            }
+        ];
+    }
 }
 
 interface CircuitBreakerState {
@@ -551,4 +794,147 @@ interface CircuitBreakerState {
     lastFailureTime: number;
     state: 'closed' | 'open' | 'half-open';
     config: CircuitBreakerConfig;
+}
+
+export interface OperationPerformance {
+    operation: string;
+    averageResponseTime: number;
+    minResponseTime: number;
+    maxResponseTime: number;
+    totalRequests: number;
+    successfulRequests: number;
+    failedRequests: number;
+    timeoutCount: number;
+    lastExecutionTime: number;
+    memoryPressureEvents: number;
+}
+
+class PerformanceMonitor {
+    private operationMetrics: Map<string, OperationPerformance> = new Map();
+    private memoryThreshold = 100 * 1024 * 1024; // 100MB
+    private cpuThreshold = 80; // 80% CPU usage
+    private monitoringInterval?: NodeJS.Timeout;
+    
+    startMonitoring(): void {
+        this.monitoringInterval = setInterval(() => {
+            this.checkSystemHealth();
+        }, 5000); // Check every 5 seconds
+    }
+    
+    stopMonitoring(): void {
+        if (this.monitoringInterval) {
+            clearInterval(this.monitoringInterval);
+            this.monitoringInterval = undefined;
+        }
+    }
+    
+    recordOperation(
+        operation: string,
+        duration: number,
+        success: boolean,
+        isTimeout: boolean = false,
+        memoryUsage?: NodeJS.MemoryUsage
+    ): void {
+        let metrics = this.operationMetrics.get(operation);
+        if (!metrics) {
+            metrics = {
+                operation,
+                averageResponseTime: 0,
+                minResponseTime: Infinity,
+                maxResponseTime: 0,
+                totalRequests: 0,
+                successfulRequests: 0,
+                failedRequests: 0,
+                timeoutCount: 0,
+                lastExecutionTime: Date.now(),
+                memoryPressureEvents: 0
+            };
+            this.operationMetrics.set(operation, metrics);
+        }
+        
+        // Update metrics
+        metrics.totalRequests++;
+        metrics.lastExecutionTime = Date.now();
+        
+        if (success) {
+            metrics.successfulRequests++;
+        } else {
+            metrics.failedRequests++;
+        }
+        
+        if (isTimeout) {
+            metrics.timeoutCount++;
+        }
+        
+        // Update response time metrics
+        metrics.minResponseTime = Math.min(metrics.minResponseTime, duration);
+        metrics.maxResponseTime = Math.max(metrics.maxResponseTime, duration);
+        metrics.averageResponseTime = (
+            (metrics.averageResponseTime * (metrics.totalRequests - 1)) + duration
+        ) / metrics.totalRequests;
+        
+        // Check for memory pressure
+        if (memoryUsage && memoryUsage.heapUsed > this.memoryThreshold) {
+            metrics.memoryPressureEvents++;
+        }
+    }
+    
+    getOperationMetrics(operation: string): OperationPerformance | undefined {
+        return this.operationMetrics.get(operation);
+    }
+    
+    getAllMetrics(): OperationPerformance[] {
+        return Array.from(this.operationMetrics.values());
+    }
+    
+    getSystemHealth(): {
+        memoryUsage: NodeJS.MemoryUsage;
+        cpuUsage: NodeJS.CpuUsage;
+        uptime: number;
+        isHealthy: boolean;
+        warnings: string[];
+    } {
+        const memoryUsage = process.memoryUsage();
+        const cpuUsage = process.cpuUsage();
+        const uptime = process.uptime();
+        
+        const warnings: string[] = [];
+        let isHealthy = true;
+        
+        // Check memory usage
+        if (memoryUsage.heapUsed > this.memoryThreshold) {
+            warnings.push(`High memory usage: ${Math.round(memoryUsage.heapUsed / 1024 / 1024)}MB`);
+            isHealthy = false;
+        }
+        
+        // Check for memory leaks (heap growing continuously)
+        if (memoryUsage.heapUsed > memoryUsage.heapTotal * 0.9) {
+            warnings.push('Potential memory leak detected');
+            isHealthy = false;
+        }
+        
+        return {
+            memoryUsage,
+            cpuUsage,
+            uptime,
+            isHealthy,
+            warnings
+        };
+    }
+    
+    private checkSystemHealth(): void {
+        const health = this.getSystemHealth();
+        if (!health.isHealthy) {
+            // Emit health warning event
+            process.emit('performance-warning' as any, {
+                warnings: health.warnings,
+                memoryUsage: health.memoryUsage,
+                timestamp: Date.now()
+            });
+        }
+    }
+    
+    reset(): void {
+        this.operationMetrics.clear();
+    }
 }

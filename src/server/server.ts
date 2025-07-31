@@ -35,6 +35,49 @@ const hoverProvider = new HoverProvider(symbolProvider);
 const completionProvider = new CompletionProvider(symbolProvider);
 const diagnosticProvider = new DiagnosticProvider(symbolProvider);
 
+// Performance monitoring for trigger characters
+interface TriggerPerformanceStats {
+    character: string;
+    totalRequests: number;
+    totalTime: number;
+    averageTime: number;
+    maxTime: number;
+    minTime: number;
+    slowRequests: number; // requests > 500ms
+}
+
+const triggerStats = new Map<string, TriggerPerformanceStats>();
+
+function updateTriggerStats(triggerCharacter: string | undefined, responseTime: number) {
+    const key = triggerCharacter || 'manual';
+    const stats = triggerStats.get(key) || {
+        character: key,
+        totalRequests: 0,
+        totalTime: 0,
+        averageTime: 0,
+        maxTime: 0,
+        minTime: Infinity,
+        slowRequests: 0
+    };
+    
+    stats.totalRequests++;
+    stats.totalTime += responseTime;
+    stats.averageTime = stats.totalTime / stats.totalRequests;
+    stats.maxTime = Math.max(stats.maxTime, responseTime);
+    stats.minTime = Math.min(stats.minTime, responseTime);
+    
+    if (responseTime > 500) {
+        stats.slowRequests++;
+    }
+    
+    triggerStats.set(key, stats);
+    
+    // Log performance summary every 50 requests for dot trigger
+    if (key === '.' && stats.totalRequests % 50 === 0) {
+        connection.console.log(`Dot trigger performance: avg=${stats.averageTime.toFixed(2)}ms, max=${stats.maxTime}ms, slow=${stats.slowRequests}/${stats.totalRequests}`);
+    }
+}
+
 // Initialize cache systems
 let cacheIntegrityValidator: CacheIntegrityValidator;
 let cacheMigrationManager: CacheMigrationManager;
@@ -65,7 +108,14 @@ connection.onInitialize((params: InitializeParams) => {
             // Tell the client that this server supports code completion.
             completionProvider: {
                 resolveProvider: true,
-                triggerCharacters: ['.', ':', '=']
+                // Enhanced trigger characters for WDL completion
+                // '.' - Task output completion (TaskName.outputParam)
+                // ':' - Type annotations and parameter definitions
+                // '=' - Input parameter assignments
+                // ' ' - General context-aware completion
+                // '{' - Block start completion (input/output blocks)
+                // '(' - Function call parameter completion
+                triggerCharacters: ['.', ':', '=', ' ', '{', '(']
             },
             // Tell the client that this server supports hover information.
             hoverProvider: true
@@ -116,10 +166,26 @@ connection.onInitialized(async () => {
             }
         }
         
-        connection.console.log('WDL Language Server initialized with persistent cache support');
+        connection.console.log('WDL Language Server initialized with enhanced trigger character support');
+        connection.console.log('Supported trigger characters: . : = space { (');
+        
     } catch (error) {
         connection.console.log(`Failed to initialize persistent cache: ${error}`);
     }
+});
+
+// Add performance statistics command
+connection.onRequest('wdl/getTriggerStats', () => {
+    const stats = Array.from(triggerStats.values());
+    return {
+        triggerStats: stats,
+        summary: {
+            totalTriggers: stats.reduce((sum, s) => sum + s.totalRequests, 0),
+            dotTriggerRequests: triggerStats.get('.')?.totalRequests || 0,
+            averageDotTriggerTime: triggerStats.get('.')?.averageTime || 0,
+            slowDotTriggerRequests: triggerStats.get('.')?.slowRequests || 0
+        }
+    };
 });
 
 // The WDL settings
@@ -222,17 +288,50 @@ connection.onDidChangeWatchedFiles(_change => {
 
 // This handler provides the initial list of the completion items.
 connection.onCompletion(
-    async (textDocumentPosition: TextDocumentPositionParams): Promise<CompletionItem[]> => {
-        const document = documents.get(textDocumentPosition.textDocument.uri);
+    async (params: any): Promise<CompletionItem[]> => {
+        const startTime = Date.now();
+        const document = documents.get(params.textDocument.uri);
         if (!document) {
             return [];
         }
         
-        return await completionProvider.provideCompletionItems(
-            document,
-            textDocumentPosition.position.line,
-            textDocumentPosition.position.character
-        );
+        // Extract trigger information if available
+        const triggerCharacter = params.context?.triggerCharacter;
+        const triggerKind = params.context?.triggerKind;
+        
+        try {
+            // Log trigger character usage for performance monitoring
+            if (triggerCharacter) {
+                connection.console.log(`Completion triggered by character: '${triggerCharacter}' at ${params.textDocument.uri}:${params.position.line}:${params.position.character}`);
+            }
+            
+            const completionItems = await (completionProvider as any).provideCompletionItemsWithTrigger(
+                document,
+                params.position.line,
+                params.position.character,
+                triggerCharacter,
+                triggerKind
+            );
+            
+            // Performance monitoring
+            const responseTime = Date.now() - startTime;
+            updateTriggerStats(triggerCharacter, responseTime);
+            
+            if (responseTime > 500) {
+                connection.console.log(`Slow completion response: ${responseTime}ms for trigger '${triggerCharacter || 'manual'}'`);
+            }
+            
+            // Log completion statistics for dot trigger (output completion)
+            if (triggerCharacter === '.') {
+                connection.console.log(`Dot trigger completion returned ${completionItems.length} items in ${responseTime}ms`);
+            }
+            
+            return completionItems;
+            
+        } catch (error) {
+            connection.console.log(`Completion error for trigger '${triggerCharacter}': ${error}`);
+            return [];
+        }
     }
 );
 
@@ -240,14 +339,44 @@ connection.onCompletion(
 // the completion list.
 connection.onCompletionResolve(
     (item: CompletionItem): CompletionItem => {
-        if (item.data === 1) {
-            item.detail = 'WDL Task';
-            item.documentation = 'Define a task in WDL';
-        } else if (item.data === 2) {
-            item.detail = 'WDL Workflow';
-            item.documentation = 'Define a workflow in WDL';
+        try {
+            // Enhanced completion resolve with WDL-specific information
+            if (item.data === 1) {
+                item.detail = 'WDL Task';
+                item.documentation = 'Define a task in WDL';
+            } else if (item.data === 2) {
+                item.detail = 'WDL Workflow';
+                item.documentation = 'Define a workflow in WDL';
+            } else if (item.data && typeof item.data === 'object') {
+                // Handle enhanced completion items with detailed data
+                const wdlData = item.data as any;
+                
+                if (wdlData.category === 'task-input') {
+                    item.detail = `Input Parameter: ${wdlData.parameterType || 'Unknown'}`;
+                    item.documentation = wdlData.description || `Input parameter for task ${wdlData.taskName}`;
+                    if (wdlData.isRequired) {
+                        item.detail += ' (Required)';
+                    }
+                } else if (wdlData.category === 'task-output') {
+                    item.detail = `Output: ${wdlData.parameterType || 'Unknown'}`;
+                    item.documentation = wdlData.description || `Output from task ${wdlData.taskName}`;
+                } else if (wdlData.category === 'task-call') {
+                    item.detail = `Task: ${wdlData.taskName}`;
+                    item.documentation = wdlData.description || `Call task ${wdlData.taskName}`;
+                }
+                
+                // Add source file information if available
+                if (wdlData.sourceFile && wdlData.sourceFile !== item.label) {
+                    item.detail += ` (from ${wdlData.sourceFile})`;
+                }
+            }
+            
+            return item;
+            
+        } catch (error) {
+            connection.console.log(`Completion resolve error: ${error}`);
+            return item;
         }
-        return item;
     }
 );
 
