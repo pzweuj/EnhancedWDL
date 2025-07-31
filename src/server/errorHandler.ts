@@ -930,7 +930,7 @@ class PerformanceMonitor {
                 warnings: health.warnings,
                 memoryUsage: health.memoryUsage,
                 timestamp: Date.now()
-            });
+            } as any);
         }
     }
     
