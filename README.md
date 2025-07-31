@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="enhancedwdl_logo.png" alt="EnhancedWDL Logo" width="200"/>
+</div>
+
 # EnhancedWDL
 
 专业的 WDL (Workflow Description Language) 语法高亮和语言支持扩展，为现代代码编辑器提供增强功能。

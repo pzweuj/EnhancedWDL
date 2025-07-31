@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="enhancedwdl_logo.png" alt="EnhancedWDL Logo" width="200"/>
+</div>
+
 # EnhancedWDL
 
 Professional syntax highlighting and language support extension for WDL (Workflow Description Language) files with enhanced features for modern code editors.
