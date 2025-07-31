@@ -4,6 +4,7 @@ dist/
 *.vsix
 .kiro
 .claude
+.wdl-cache
 
 # Node.js dependencies
 node_modules/
